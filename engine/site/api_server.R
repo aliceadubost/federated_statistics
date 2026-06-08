@@ -287,7 +287,13 @@ pr$handle("POST", "/validate", function(req, res) {
 
 # ---- /health (simple ping) -------------------------------------
 pr$handle("GET", "/health", function(req, res) {
-  list(status = "ok", rows = nrow(site_data))
+  tryCatch({
+    check_token(req)
+    list(status = "ok", rows = nrow(site_data))
+  }, error = function(e) {
+    res$status <- 401
+    list(error = conditionMessage(e))
+  })
 })
 
 # ------------------------------------------------------------------
