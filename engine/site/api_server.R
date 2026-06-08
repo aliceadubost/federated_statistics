@@ -297,6 +297,25 @@ pr$handle("GET", "/health", function(req, res) {
 })
 
 # ------------------------------------------------------------------
-# Start
+# Start — bind to Tailscale interface if available
 # ------------------------------------------------------------------
-pr$run(host = "0.0.0.0", port = PORT)
+BIND_HOST <- tryCatch({
+  ip <- trimws(system("tailscale ip -4 2>/dev/null", intern = TRUE,
+                      ignore.stderr = TRUE))
+  if (length(ip) > 0L && nzchar(ip[1L]) &&
+      grepl("^100\\.", ip[1L])) {
+    ip[1L]
+  } else {
+    ""
+  }
+}, error = function(e) "")
+
+if (nzchar(BIND_HOST)) {
+  cat(sprintf("[api_server] Binding to Tailscale interface: %s\n", BIND_HOST))
+} else {
+  cat(paste0("[api_server] WARNING: Tailscale not detected. Binding to 0.0.0.0 ",
+             "(all interfaces). For production use, connect Tailscale first.\n"))
+  BIND_HOST <- "0.0.0.0"
+}
+
+pr$run(host = BIND_HOST, port = PORT)
