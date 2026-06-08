@@ -55,6 +55,43 @@ cat(sprintf("[api_server] Loaded %d rows. Listening on port %d.\n",
             nrow(site_data), PORT))
 
 # ------------------------------------------------------------------
+# Helpers: input validation for the structured model_spec protocol
+# ------------------------------------------------------------------
+
+# Validate a single variable name received over the wire.
+# Accepts standard R/CSV column names; rejects anything that could be
+# interpreted as R code if interpolated into an expression.
+.validate_varname <- function(name) {
+  if (!is.character(name) || length(name) != 1L ||
+      !grepl("^[A-Za-z][A-Za-z0-9_.]{0,63}$", name))
+    stop(paste0("Invalid variable name: '", name, "'"))
+  invisible(name)
+}
+
+# Validate a model_spec object and reconstruct a safe R formula.
+# Every string that reaches as.formula() originates from validated
+# variable names, never from raw network input.
+.spec_to_formula <- function(spec, data) {
+  if (is.null(spec))
+    stop("Request must include a model_spec object.")
+  outcome <- .validate_varname(spec$outcome)
+  preds   <- vapply(unlist(spec$predictors, use.names = FALSE),
+                    .validate_varname, character(1L))
+  if (length(preds) == 0L)
+    stop("model_spec: at least one predictor is required.")
+
+  missing_vars <- setdiff(c(outcome, preds), names(data))
+  if (length(missing_vars) > 0L)
+    stop(paste0("Variable(s) not found in dataset: ",
+                paste(missing_vars, collapse = ", ")))
+
+  intercept <- !identical(spec$intercept, FALSE)
+  rhs <- if (intercept) paste(preds, collapse = " + ")
+         else paste0("0 + ", paste(preds, collapse = " + "))
+  as.formula(paste(outcome, "~", rhs), env = baseenv())
+}
+
+# ------------------------------------------------------------------
 # Helper: check bearer token if one is configured
 # ------------------------------------------------------------------
 check_token <- function(req) {
@@ -81,8 +118,10 @@ pr <- plumber::Plumber$new()
 pr$handle("POST", "/termnames", function(req, res) {
   tryCatch({
     check_token(req)
-    body    <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
-    formula <- as.formula(body$formula)
+    body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
+    if (!is.null(body$formula))
+      stop("formula field no longer accepted; send model_spec instead.")
+    formula <- .spec_to_formula(body$model_spec, site_data)
     list(termnames = as.list(srv$termnames(formula)))
   }, error = function(e) {
     res$status <- 400
@@ -94,12 +133,18 @@ pr$handle("POST", "/termnames", function(req, res) {
 pr$handle("POST", "/grad_hess", function(req, res) {
   tryCatch({
     check_token(req)
-    body      <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
-    formula   <- as.formula(body$formula)
-    beta_vals <- as.numeric(unlist(body$beta, use.names = FALSE))
+    body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
+    if (!is.null(body$formula))
+      stop("formula field no longer accepted; send model_spec instead.")
+    family <- if (!is.null(body$family)) body$family else "binomial_logit"
+    if (!identical(family, "binomial_logit"))
+      stop(paste0("Unsupported family: '", family,
+                  "'. Only binomial_logit is currently supported."))
+    formula    <- .spec_to_formula(body$model_spec, site_data)
+    beta_vals  <- as.numeric(unlist(body$beta, use.names = FALSE))
     beta_names <- unlist(body$beta_names)
-    beta      <- setNames(beta_vals, beta_names)
-    
+    beta       <- setNames(beta_vals, beta_names)
+
     r <- srv$grad_hess(formula, beta)
     
     # Serialise matrix as flat vector + dims
@@ -126,9 +171,11 @@ pr$handle("POST", "/grad_hess", function(req, res) {
 pr$handle("POST", "/lm_suffstats", function(req, res) {
   tryCatch({
     check_token(req)
-    body    <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
-    formula <- as.formula(body$formula)
-    
+    body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
+    if (!is.null(body$formula))
+      stop("formula field no longer accepted; send model_spec instead.")
+    formula <- .spec_to_formula(body$model_spec, site_data)
+
     r <- srv$lm_suffstats(formula)
     
     list(
@@ -155,7 +202,10 @@ pr$handle("POST", "/summary_numeric", function(req, res) {
   tryCatch({
     check_token(req)
     body    <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
-    r <- srv$summary_numeric(body$varname)
+    varname <- .validate_varname(body$varname)
+    if (!varname %in% names(site_data))
+      stop(paste0("Variable not found in dataset: '", varname, "'"))
+    r <- srv$summary_numeric(varname)
     list(type = r$type, n = r$n, sum = r$sum, sumsq = r$sumsq)
   }, error = function(e) {
     res$status <- 400
@@ -167,8 +217,14 @@ pr$handle("POST", "/summary_numeric", function(req, res) {
 pr$handle("POST", "/group_summaries", function(req, res) {
   tryCatch({
     check_token(req)
-    body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
-    r    <- srv$group_summaries(body$varname, body$groupvar)
+    body     <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
+    varname  <- .validate_varname(body$varname)
+    groupvar <- .validate_varname(body$groupvar)
+    missing_vars <- setdiff(c(varname, groupvar), names(site_data))
+    if (length(missing_vars) > 0L)
+      stop(paste0("Variable(s) not found in dataset: ",
+                  paste(missing_vars, collapse = ", ")))
+    r <- srv$group_summaries(varname, groupvar)
     
     # Convert each group's stats list to JSON-safe form
     stats_out <- lapply(r$stats, function(z) {
@@ -187,7 +243,13 @@ pr$handle("POST", "/counts_2x2", function(req, res) {
   tryCatch({
     check_token(req)
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
-    r    <- srv$counts_2x2(body$xvar, body$yvar)
+    xvar <- .validate_varname(body$xvar)
+    yvar <- .validate_varname(body$yvar)
+    missing_vars <- setdiff(c(xvar, yvar), names(site_data))
+    if (length(missing_vars) > 0L)
+      stop(paste0("Variable(s) not found in dataset: ",
+                  paste(missing_vars, collapse = ", ")))
+    r <- srv$counts_2x2(xvar, yvar)
     list(
       type = r$type,
       n00  = r$n00, n01 = r$n01,
@@ -209,10 +271,12 @@ pr$handle("POST", "/counts_2x2", function(req, res) {
 pr$handle("POST", "/validate", function(req, res) {
   tryCatch({
     check_token(req)
-    body      <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
+    body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
+    if (!is.null(body$formula))
+      stop("formula field no longer accepted; send model_spec instead.")
     vars_spec <- body$vars_spec
-    formula   <- if (!is.null(body$formula) && nzchar(body$formula))
-                   as.formula(body$formula) else NULL
+    formula   <- if (!is.null(body$model_spec))
+                   .spec_to_formula(body$model_spec, site_data) else NULL
     min_n     <- if (!is.null(body$min_n)) as.integer(body$min_n) else 20L
     srv$validate_data(vars_spec, formula, min_n)
   }, error = function(e) {

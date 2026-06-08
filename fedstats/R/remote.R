@@ -1,7 +1,45 @@
 # Internal helpers ---------------------------------------------------
 
-.formula_to_string <- function(formula) {
-  paste(deparse(formula), collapse = "")
+# Convert an R formula to the structured model_spec sent over the wire.
+# Only additive main-effects formulas are supported; interactions and
+# in-formula transformations are rejected here (client-side UX guard)
+# because the server reconstructs the formula from whitelisted variable
+# names only and cannot represent them safely.
+.model_spec_from_formula <- function(formula) {
+  tt   <- terms(formula)
+  resp <- attr(tt, "response")
+  if (resp == 0L)
+    stop("Federated protocol error: formula has no outcome variable (left-hand side).")
+  outcome <- as.character(attr(tt, "variables")[[resp + 1L]])
+  labs    <- attr(tt, "term.labels")   # e.g. c("age", "sex")
+  ords    <- attr(tt, "order")         # 1 for main effects, 2+ for interactions
+
+  if (length(ords) > 0L && any(ords > 1L))
+    stop(paste0(
+      "Federated protocol error: formula contains interaction terms ",
+      "(e.g. x1*x2 or x1:x2).\n",
+      "These cannot be transmitted securely in the federated protocol.\n",
+      "Add a pre-computed interaction column to your data file instead,\n",
+      "then include it as a plain predictor (e.g. y ~ x1 + x2 + x1_x2)."
+    ))
+
+  if (any(grepl("(", labs, fixed = TRUE)))
+    stop(paste0(
+      "Federated protocol error: formula contains in-formula transformations ",
+      "(e.g. I(x^2), log(x)).\n",
+      "These cannot be transmitted securely in the federated protocol.\n",
+      "Add a pre-computed column to your data file instead,\n",
+      "then include it as a plain predictor."
+    ))
+
+  if (length(labs) == 0L)
+    stop("Federated protocol error: formula has no predictor terms.")
+
+  list(
+    outcome    = outcome,
+    predictors = as.list(labs),
+    intercept  = as.logical(attr(tt, "intercept"))
+  )
 }
 
 .payload_to_matrix <- function(x) {
@@ -75,13 +113,15 @@ create_remote_server <- function(base_url,
 
     termnames = function(formula) {
       r <- .remote_post(base_url, "/termnames",
-                        list(formula = .formula_to_string(formula)), token)
+                        list(model_spec = .model_spec_from_formula(formula)),
+                        token)
       unlist(r$termnames)
     },
 
     grad_hess = function(formula, beta) {
       r <- .remote_post(base_url, "/grad_hess",
-                        list(formula    = .formula_to_string(formula),
+                        list(family     = "binomial_logit",
+                             model_spec = .model_spec_from_formula(formula),
                              beta       = as.list(as.numeric(beta)),
                              beta_names = as.list(names(beta))),
                         token)
@@ -95,7 +135,8 @@ create_remote_server <- function(base_url,
 
     lm_suffstats = function(formula) {
       r <- .remote_post(base_url, "/lm_suffstats",
-                        list(formula = .formula_to_string(formula)), token)
+                        list(model_spec = .model_spec_from_formula(formula)),
+                        token)
       Xty <- as.numeric(unlist(r$Xty, use.names = FALSE))
       names(Xty) <- unlist(r$termnames)
       list(n         = as.integer(r$n),
@@ -135,9 +176,9 @@ create_remote_server <- function(base_url,
     validate_data = function(vars_spec, formula = NULL, min_n = 20L) {
       .remote_post(
         base_url, "/validate",
-        list(vars_spec = vars_spec,
-             formula   = if (!is.null(formula)) .formula_to_string(formula) else NULL,
-             min_n     = as.integer(min_n)),
+        list(vars_spec  = vars_spec,
+             model_spec = if (!is.null(formula)) .model_spec_from_formula(formula) else NULL,
+             min_n      = as.integer(min_n)),
         token
       )
     }
