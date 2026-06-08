@@ -53,6 +53,11 @@ create_server <- function(site_data, min_n = 1) {
     grad_hess = function(formula, beta) {
       d   <- .build_design(df, formula)
       X   <- d$X; y <- d$y
+      if (length(y) < min_n)
+        stop(sprintf(
+          "Query covers only %d complete case(s); minimum is %d. ",
+          length(y), min_n
+        ))
       eta <- as.vector(X %*% beta)
       mu  <- 1 / (1 + exp(-eta))
       w   <- mu * (1 - mu)
@@ -68,6 +73,11 @@ create_server <- function(site_data, min_n = 1) {
     lm_suffstats = function(formula) {
       d <- .build_design(df, formula)
       X <- d$X; y <- d$y
+      if (length(y) < min_n)
+        stop(sprintf(
+          "Query covers only %d complete case(s); minimum is %d. ",
+          length(y), min_n
+        ))
       list(
         n         = length(y),
         termnames = colnames(X),
@@ -81,6 +91,11 @@ create_server <- function(site_data, min_n = 1) {
     summary_numeric = function(varname) {
       x <- suppressWarnings(as.numeric(df[[varname]]))
       x <- x[!is.na(x)]
+      if (length(x) < min_n)
+        stop(sprintf(
+          "Query covers only %d non-missing value(s); minimum is %d. ",
+          length(x), min_n
+        ))
       list(type = "numeric", n = length(x), sum = sum(x), sumsq = sum(x * x))
     },
 
@@ -90,6 +105,11 @@ create_server <- function(site_data, min_n = 1) {
       g  <- as.character(df[[groupvar]])
       ok <- !(is.na(x) | is.na(g))
       x  <- x[ok]; g <- g[ok]
+      if (length(x) < min_n)
+        stop(sprintf(
+          "Query covers only %d complete case(s); minimum is %d. ",
+          length(x), min_n
+        ))
       lvls  <- sort(unique(g))
       stats <- lapply(lvls, function(lv) {
         xi <- x[g == lv]
@@ -105,6 +125,11 @@ create_server <- function(site_data, min_n = 1) {
       y  <- suppressWarnings(as.numeric(df[[yvar]]))
       ok <- !(is.na(x) | is.na(y))
       x  <- x[ok]; y <- y[ok]
+      if (length(x) < min_n)
+        stop(sprintf(
+          "Query covers only %d complete case(s); minimum is %d. ",
+          length(x), min_n
+        ))
       if (any(!x %in% c(0, 1)) || any(!y %in% c(0, 1)))
         stop("counts_2x2(): both variables must be binary (0/1).")
       list(type = "2x2",
