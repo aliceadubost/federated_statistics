@@ -66,11 +66,19 @@ Each template has `# ── ADAPT:` comments marking the lines you need to chang
 
 ---
 
-## Privacy guarantee
+## Privacy model
 
-- Sites share only aggregate statistics (counts, sums, model gradients) and never individual rows
-- Each site controls its own server: they can see exactly what is being asked and stop at any time
-- Optional token-based authentication to restrict who can query a site
+**What the tool does:**
+- No patient rows ever leave the site. Only aggregate statistics are transmitted: counts, sums, sums of squares, and model gradients.
+- Every aggregate returned by a site is based on at least **`min_n` rows** (default: 20). Queries that would reveal statistics from fewer rows are refused with an error. This is enforced at the site server, not just at startup.
+- Each site controls its own server. Site operators can see every query being made and stop the server at any time.
+- Token-based authentication (optional but recommended) ensures only the intended coordinator can query a site.
+- Network traffic between sites and coordinator is encrypted by Tailscale (WireGuard). The API itself runs over plain HTTP within that encrypted tunnel.
+
+**Known limitations:**
+- A coordinator who issues many carefully chosen narrow queries could potentially infer information about small groups, even with `min_n` enforcement. This tool does not implement differential privacy. For analyses involving very sensitive subgroups, consult your institution's data governance team.
+- The `min_n` threshold is a configurable floor, not a formal privacy guarantee. Higher values provide stronger protection at the cost of excluding sites with small datasets.
+- The tool assumes the coordinator is a trusted researcher. It does not protect against a malicious coordinator who has legitimate access.
 
 ---
 
