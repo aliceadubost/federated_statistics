@@ -40,7 +40,7 @@ role <- if (length(role) > 0) role[1] else "coordinator"
 # fedstats itself declares httr + jsonlite + sodium as Imports — they
 # will also be pulled in when fedstats is installed below.
 cran_pkgs <- if (role == "site") {
-  c("shiny", "processx", "plumber", "jsonlite", "sodium")
+  c("shiny", "processx", "plumber", "jsonlite", "sodium", "httr")
 } else {
   c("shiny", "httr", "jsonlite", "processx", "sodium")
 }

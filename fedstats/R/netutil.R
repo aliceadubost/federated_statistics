@@ -54,6 +54,44 @@ fed_advertised_host <- function() {
   fed_tailscale_ip()
 }
 
+#' Restrict a file to the current user (best-effort, cross-platform)
+#'
+#' Used for files that hold secrets (tokens / private keys). Pairs with
+#' \code{\link{fed_check_file_perms}}, which warns if it did not take.
+#'
+#' @param path File to harden.
+#' @return TRUE if the file existed and hardening was attempted.
+#' @export
+fed_harden_file <- function(path) {
+  if (!file.exists(path)) return(invisible(FALSE))
+  if (.Platform$OS.type == "windows") {
+    user <- Sys.getenv("USERNAME")
+    if (nzchar(user))
+      try(system2("icacls", c(shQuote(path), "/inheritance:r",
+                              "/grant:r", shQuote(paste0(user, ":F"))),
+                  stdout = FALSE, stderr = FALSE), silent = TRUE)
+  } else {
+    try(Sys.chmod(path, mode = "0600"), silent = TRUE)
+  }
+  invisible(TRUE)
+}
+
+#' Warn if a secret file is readable beyond its owner
+#'
+#' @param path File to check.
+#' @return A warning string, or "" if fine / not checkable.
+#' @export
+fed_check_file_perms <- function(path) {
+  if (!file.exists(path)) return("")
+  if (.Platform$OS.type == "windows") return("")  # rely on harden-on-write
+  mode <- file.info(path)$mode
+  if (is.na(mode)) return("")
+  if (bitwAnd(as.integer(mode), strtoi("077", 8L)) != 0L)
+    return(sprintf("WARNING: %s is readable by other users (mode %s).",
+                   path, format(mode)))
+  ""
+}
+
 #' Decide the interface to bind a server to
 #'
 #' Binds to the Tailscale interface when present; otherwise signals a
