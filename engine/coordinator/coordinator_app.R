@@ -7,24 +7,81 @@
 #   VARS_SPEC       — used for pre-analysis validation
 #   register_output(name, value, type, caption) — drives dynamic tabs
 #
+# Phase 2: sites onboard via signed invite bundles instead of pasted
+# URLs. This app runs a background registrar subprocess (registrar.R)
+# that receives site registration callbacks, and polls the registry
+# file to display registered sites. Per-site tokens are read from the
+# registry; a manual-add escape hatch preserves the old shared-token
+# workflow for backward compatibility.
+#
 # Start with the launcher (double-click):
-#   start_coordinator_gui.command  (macOS)
-#   start_coordinator_gui.bat      (Windows)
-#   bash start_coordinator_gui.sh  (Linux)
+#   Run/Mac/Start Coordinator.command  (macOS)
+#   Run/Windows/Start Coordinator.bat  (Windows)
+#   Run/Linux/Start Coordinator.sh     (Linux)
 # =====================================================================
 suppressPackageStartupMessages({
   library(shiny)
   library(httr)
   library(jsonlite)
   library(fedstats)
+  library(processx)
 })
+
+# Registry state-machine + persistence (sibling file; wd is this dir).
+source(file.path(getwd(), "registry.R"))
+
+# ---------------------------------------------------------------
+# Paths and configuration
+# ---------------------------------------------------------------
+APP_DIR          <- getwd()
+REG_FILE         <- normalizePath(file.path(APP_DIR, "registered_sites.json"),
+                                  mustWork = FALSE)
+KEY_FILE         <- file.path(APP_DIR, "coordinator_key.json")
+REGISTRAR_SCRIPT <- file.path(APP_DIR, "registrar.R")
+REGISTRAR_PORT   <- as.integer(Sys.getenv("FED_REGISTRAR_PORT", "8731"))
+INVITE_TTL_DAYS  <- as.integer(Sys.getenv("FED_INVITE_TTL_DAYS", "7"))
+
+# ---- Coordinator signing key: load existing or create once ----------
+.load_or_create_key <- function() {
+  if (file.exists(KEY_FILE)) {
+    k <- tryCatch(jsonlite::fromJSON(KEY_FILE, simplifyVector = TRUE),
+                  error = function(e) NULL)
+    if (!is.null(k) && !is.null(k$private) && !is.null(k$public)) return(k)
+  }
+  kp <- fed_keypair()
+  writeLines(jsonlite::toJSON(kp, auto_unbox = TRUE), KEY_FILE)
+  reg_harden_file(KEY_FILE)
+  kp
+}
+COORD_KEY  <- .load_or_create_key()
+COORD_FP   <- fed_fingerprint(COORD_KEY$public)
+COORD_HOST <- fed_advertised_host()                  # MagicDNS preferred (Q3)
+COORD_ADDR <- if (nzchar(COORD_HOST))
+                sprintf("%s:%d", COORD_HOST, REGISTRAR_PORT) else ""
+
+# ---- Registrar subprocess (single, app-level) -----------------------
+.start_registrar <- function() {
+  envv <- Sys.getenv()
+  envv["FED_REGISTRY_FILE"]  <- REG_FILE
+  envv["FED_REGISTRAR_PORT"] <- as.character(REGISTRAR_PORT)
+  envv["FED_INVITE_TTL_DAYS"] <- as.character(INVITE_TTL_DAYS)
+  processx::process$new("Rscript", REGISTRAR_SCRIPT, env = envv, wd = APP_DIR,
+                        stdout = "|", stderr = "|")
+}
+registrar_proc <- tryCatch(.start_registrar(), error = function(e) NULL)
+onStop(function() {
+  try(if (!is.null(registrar_proc) && registrar_proc$is_alive())
+        registrar_proc$kill(), silent = TRUE)
+})
+
+# Warn (in the launcher console) if the registry is world-readable.
+{
+  w <- reg_check_perms(REG_FILE)
+  if (nzchar(w)) cat("[coordinator]", w, "\n")
+}
 
 # ---------------------------------------------------------------
 # Script metadata extraction
-#
-# Evaluates ONLY the lines before the "if (!exists("servers"...)"
-# block — so we get ANALYSIS_TITLE and VARS_SPEC without triggering
-# any analysis code.
 # ---------------------------------------------------------------
 .extract_meta <- function(script_path) {
   lines  <- readLines(script_path, warn = FALSE)
@@ -59,39 +116,19 @@ cap_print <- function(expr) {
   paste(buf, collapse = "\n")
 }
 
-get_urls <- function(txt) {
-  raw <- trimws(strsplit(txt, "\n")[[1]])
-  raw[nzchar(raw)]
-}
-
-ping_one <- function(url, token, idx) {
+ping_one <- function(url, token, idx, name = "") {
+  label <- if (nzchar(name)) name else paste("Site", idx)
   tryCatch({
     hdrs <- if (nzchar(token))
       httr::add_headers(Authorization = paste("Bearer", token)) else NULL
     r <- httr::GET(paste0(sub("/+$", "", url), "/health"), hdrs, httr::timeout(8))
     if (httr::status_code(r) == 200) {
       rows <- as.integer(unlist(httr::content(r, as = "parsed")$rows))
-      sprintf("Site %d  [OK]   n = %d rows   %s", idx, rows, url)
+      sprintf("%s  [OK]   n = %d rows   %s", label, rows, url)
     } else {
-      sprintf("Site %d  [ERR]  HTTP %d   %s", idx, httr::status_code(r), url)
+      sprintf("%s  [ERR]  HTTP %d   %s", label, httr::status_code(r), url)
     }
-  }, error = function(e) sprintf("Site %d  [ERR]  %s", idx, conditionMessage(e)))
-}
-
-# ---------------------------------------------------------------
-# Coordinator's Tailscale IP for the URL placeholder
-# ---------------------------------------------------------------
-.ts_ip <- tryCatch({
-  cmd <- if (.Platform$OS.type == "windows") "tailscale ip -4"
-         else "tailscale ip -4 2>/dev/null"
-  ip  <- trimws(system(cmd, intern = TRUE, ignore.stderr = TRUE))
-  if (length(ip) > 0 && nzchar(ip[1])) ip[1] else ""
-}, error = function(e) "")
-
-.url_placeholder <- if (nzchar(.ts_ip)) {
-  sprintf("http://100.x.x.x:8000\nhttp://100.x.x.x:8001\n\n(Your Tailscale IP: %s)", .ts_ip)
-} else {
-  "http://100.x.x.x:8000\nhttp://100.x.x.x:8001"
+  }, error = function(e) sprintf("%s  [ERR]  %s", label, conditionMessage(e)))
 }
 
 # ---------------------------------------------------------------
@@ -124,7 +161,34 @@ ui <- fluidPage(
     .btn-primary:hover,
     .btn-primary:focus  { background-color: #5a0a91 !important;
                           border-color: #4a0080 !important; }
+    /* ── Sites table ───────────────────────────────────────────── */
+    .sites-tbl { width:100%; font-size:0.82em; border-collapse:collapse; }
+    .sites-tbl th { text-align:left; color:#6A0DAD; font-size:0.78em;
+                    border-bottom:1px solid #e9d5ff; padding:3px 4px; }
+    .sites-tbl td { padding:4px; border-bottom:1px solid #f0e6fa;
+                    vertical-align:middle; word-break:break-all; }
+    .sbadge { display:inline-block; padding:1px 8px; border-radius:9px;
+              font-size:0.72em; font-weight:bold; }
+    .sb-ok    { background:#e9d5ff; color:#4a0080; }
+    .sb-info  { background:#fefcbf; color:#744210; }
+    .sb-warn  { background:#fed7d7; color:#9b2c2c; }
+    .sb-muted { background:#edf2f7; color:#718096; }
+    .coord-addr { font-family:monospace; font-size:0.80em; color:#4a0080;
+                  background:#f3e8ff; border:1px solid #c084fc;
+                  border-radius:4px; padding:4px 8px; word-break:break-all; }
+    .fp { font-family:monospace; font-size:0.78em; color:#718096; }
+    .inv-box { width:100%; height:120px; font-family:monospace; font-size:0.74em;
+               word-break:break-all; }
   "))),
+
+  tags$script(HTML("
+    function fedCopy(id){
+      var el = document.getElementById(id);
+      if(!el) return;
+      el.select(); el.setSelectionRange(0, 99999);
+      navigator.clipboard.writeText(el.value);
+    }
+  ")),
 
   uiOutput("app_title_ui"),
 
@@ -138,14 +202,15 @@ ui <- fluidPage(
                 buttonLabel = "Browse…", placeholder = "No script selected"),
       uiOutput("script_meta_ui"),
 
-      # ---- Step 2: site URLs ----
-      div(class = "step", "② Site URLs  (one per line)"),
-      textAreaInput("urls", NULL,
-                    placeholder = .url_placeholder, rows = 5, width = "100%"),
-
-      # ---- Step 3: optional token ----
-      div(class = "step", "③ Security token"),
-      passwordInput("token", NULL, placeholder = "(leave blank if none)"),
+      # ---- Step 2: sites ----
+      div(class = "step", "② Sites"),
+      uiOutput("registrar_status_ui"),
+      div(style = "margin:6px 0;",
+          actionButton("btn_invite", "Invite a site",
+                       class = "btn-primary btn-xs"),
+          actionButton("btn_add_manual", "Add manually",
+                       class = "btn-default btn-xs")),
+      uiOutput("sites_table_ui"),
 
       br(),
       actionButton("btn_ping",     "Ping sites",
@@ -181,8 +246,40 @@ server <- function(input, output, session) {
     meta        = NULL,   # list(title, vars_spec)
     outputs     = NULL,   # list of register_output() entries
     val_txt     = NULL,   # text from standalone Validate
-    console_log = NULL    # captured cat()/print() output from analysis script
+    console_log = NULL,   # captured cat()/print() output from analysis script
+    reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
+    manual      = list()  # manual escape-hatch sites: list(name,url,token)
   )
+
+  # ---- Poll the registry file + drain registrar logs ------------
+  poll <- reactiveTimer(1500)
+  observe({
+    poll()
+    rv$reg <- reg_load(REG_FILE)
+    # Drain the registrar's pipes so its output buffer never blocks.
+    if (!is.null(registrar_proc) && registrar_proc$is_alive()) {
+      invisible(tryCatch(registrar_proc$read_output_lines(), error = function(e) NULL))
+      invisible(tryCatch(registrar_proc$read_error_lines(),  error = function(e) NULL))
+    }
+  })
+
+  # ---- Active sites for analysis (registry consumed + manual) ---
+  active_sites <- reactive({
+    sites <- list()
+    reg <- rv$reg
+    if (!is.null(reg)) {
+      for (sid in names(reg$sites)) {
+        r <- reg$sites[[sid]]
+        if (identical(r$invite_state, "consumed") && !is.null(r$site_addr))
+          sites[[length(sites) + 1L]] <-
+            list(name = r$name, url = r$site_addr, token = r$token)
+      }
+    }
+    for (m in rv$manual)
+      sites[[length(sites) + 1L]] <-
+        list(name = m$name, url = m$url, token = m$token)
+    sites
+  })
 
   # ---- Dynamic app title from script ----------------------------
   output$app_title_ui <- renderUI({
@@ -217,32 +314,192 @@ server <- function(input, output, session) {
     )
   })
 
+  # ---- Registrar status + coordinator address -------------------
+  output$registrar_status_ui <- renderUI({
+    poll()
+    alive <- !is.null(registrar_proc) && registrar_proc$is_alive()
+    if (!alive)
+      return(div(class = "sbadge sb-warn", style = "margin-bottom:4px;",
+                 "Registrar not running"))
+    tagList(
+      if (nzchar(COORD_ADDR))
+        div(class = "coord-addr", title = "Sites register here automatically",
+            paste0("Registrar: ", COORD_ADDR))
+      else
+        div(class = "sbadge sb-warn",
+            "Tailscale not detected — invites will not be reachable remotely."),
+      div(class = "fp", title = "Read this to a site operator to verify your key",
+          paste0("Key fingerprint: ", COORD_FP))
+    )
+  })
+
+  # ---- Sites table ----------------------------------------------
+  output$sites_table_ui <- renderUI({
+    reg <- rv$reg
+    badge <- function(state, pending) {
+      if (!is.null(pending)) return(span(class = "sbadge sb-warn", "Needs approval"))
+      switch(state,
+        issued   = span(class = "sbadge sb-info",  "Invited"),
+        in_use   = span(class = "sbadge sb-info",  "Registering"),
+        consumed = span(class = "sbadge sb-ok",    "Registered"),
+        expired  = span(class = "sbadge sb-muted", "Expired"),
+        span(class = "sbadge sb-muted", state))
+    }
+    act_btn <- function(label, cls, inp, val)
+      tags$button(label, class = paste("btn btn-xs", cls),
+        style = "margin:0 1px;",
+        onclick = sprintf("Shiny.setInputValue('%s', %s, {priority:'event'})",
+                          inp, jsonlite::toJSON(val, auto_unbox = TRUE)))
+
+    rows <- list()
+    if (!is.null(reg)) for (sid in names(reg$sites)) {
+      r <- reg$sites[[sid]]
+      actions <- tagList(
+        if (!is.null(r$pending))
+          act_btn("Approve", "btn-success", "approve_sid", sid),
+        act_btn("Revoke", "btn-danger", "revoke_sid", sid))
+      rows[[length(rows) + 1L]] <- tags$tr(
+        tags$td(if (nzchar(r$name)) r$name else "(unnamed)"),
+        tags$td(if (!is.null(r$site_addr)) r$site_addr else "—"),
+        tags$td(badge(r$invite_state, r$pending)),
+        tags$td(actions))
+    }
+    if (length(rv$manual)) for (i in seq_along(rv$manual)) {
+      m <- rv$manual[[i]]
+      rows[[length(rows) + 1L]] <- tags$tr(
+        tags$td(if (nzchar(m$name)) m$name else "(manual)"),
+        tags$td(m$url),
+        tags$td(span(class = "sbadge sb-muted", "Manual")),
+        tags$td(act_btn("Remove", "btn-danger", "manual_remove", i)))
+    }
+    if (!length(rows))
+      return(div(class = "note", "No sites yet. Click “Invite a site”."))
+
+    tags$table(class = "sites-tbl",
+      tags$thead(tags$tr(tags$th("Name"), tags$th("Address"),
+                         tags$th("Status"), tags$th(""))),
+      tags$tbody(rows))
+  })
+
+  # ---- Invite a site --------------------------------------------
+  observeEvent(input$btn_invite, {
+    showModal(modalDialog(
+      title = "Invite a site",
+      textInput("inv_study", "Study name",
+                value = if (!is.null(rv$meta)) rv$meta$title else "Federated study"),
+      textInput("inv_name", "Site name (label)", placeholder = "e.g. Karolinska"),
+      if (!nzchar(COORD_ADDR))
+        div(class = "sbadge sb-warn",
+            "Tailscale not detected — this invite will not be reachable by remote sites."),
+      footer = tagList(modalButton("Cancel"),
+                       actionButton("inv_make", "Create invite", class = "btn-primary")),
+      easyClose = TRUE))
+  })
+
+  observeEvent(input$inv_make, {
+    name  <- trimws(input$inv_name)
+    study <- trimws(input$inv_study)
+    sid   <- fed_sid()
+    token <- fed_token()
+    exp   <- as.integer(Sys.time()) + INVITE_TTL_DAYS * 86400L
+    reg_modify(REG_FILE, function(reg)
+      reg_add_invite(reg, sid, name, study, token, exp))
+    rv$reg <- reg_load(REG_FILE)
+
+    invite <- fed_invite_create(
+      study = study, coord = COORD_ADDR, sid = sid, token = token,
+      private_key = COORD_KEY$private, name = name, ttl_days = INVITE_TTL_DAYS)
+
+    removeModal()
+    showModal(modalDialog(
+      title = "Invite created",
+      p("Send this invite to the site operator. It expires in ",
+        strong(paste0(INVITE_TTL_DAYS, " day(s)")), "."),
+      tags$textarea(id = "invite_str", class = "inv-box", readonly = NA, invite),
+      div(style = "margin-top:6px;",
+          tags$button("Copy", class = "btn btn-primary btn-sm",
+                      onclick = "fedCopy('invite_str')")),
+      div(class = "fp", style = "margin-top:10px;",
+          "Your key fingerprint (read it to the operator to verify): ",
+          tags$b(COORD_FP)),
+      footer = modalButton("Done"), easyClose = TRUE, size = "l"))
+  })
+
+  # ---- Approve a held registration ------------------------------
+  observeEvent(input$approve_sid, {
+    sid <- input$approve_sid
+    reg_modify(REG_FILE, function(reg) reg_approve_pending(reg, sid))
+    rv$reg <- reg_load(REG_FILE)
+    showNotification("Registration approved.", type = "message")
+  })
+
+  # ---- Revoke and Remove ----------------------------------------
+  observeEvent(input$revoke_sid, {
+    sid <- input$revoke_sid
+    reg_modify(REG_FILE, function(reg) reg_revoke_remove(reg, sid))
+    rv$reg <- reg_load(REG_FILE)
+    showNotification("Site revoked and removed.", type = "message")
+  })
+
+  # ---- Manual add / remove (backward-compat escape hatch) -------
+  observeEvent(input$btn_add_manual, {
+    showModal(modalDialog(
+      title = "Add a site manually",
+      p(class = "note",
+        "For sites configured the old way (shared token), or when you ",
+        "already know a site's address."),
+      textInput("man_name", "Site name (label)", placeholder = "optional"),
+      textInput("man_url", "Site URL", placeholder = "http://100.x.x.x:8000"),
+      passwordInput("man_token", "Token", placeholder = "(leave blank if none)"),
+      footer = tagList(modalButton("Cancel"),
+                       actionButton("man_add", "Add", class = "btn-primary")),
+      easyClose = TRUE))
+  })
+
+  observeEvent(input$man_add, {
+    url <- trimws(input$man_url)
+    if (!nzchar(url)) {
+      showNotification("Enter a site URL.", type = "warning"); return()
+    }
+    rv$manual[[length(rv$manual) + 1L]] <-
+      list(name = trimws(input$man_name), url = url,
+           token = trimws(input$man_token))
+    removeModal()
+  })
+
+  observeEvent(input$manual_remove, {
+    i <- as.integer(input$manual_remove)
+    if (!is.na(i) && i >= 1 && i <= length(rv$manual))
+      rv$manual[[i]] <- NULL
+  })
+
   # ---- Ping -----------------------------------------------------
   observeEvent(input$btn_ping, {
-    urls <- get_urls(input$urls)
-    if (!length(urls)) {
-      showNotification("Enter at least one site URL.", type = "warning")
+    sites <- active_sites()
+    if (!length(sites)) {
+      showNotification("No sites to ping. Invite or add a site first.",
+                       type = "warning")
       return()
     }
-    tok <- trimws(input$token)
     withProgress(message = "Pinging sites…", {
-      lines <- mapply(ping_one, urls, idx = seq_along(urls),
-                      MoreArgs = list(token = tok), SIMPLIFY = TRUE)
+      lines <- vapply(seq_along(sites), function(i) {
+        s <- sites[[i]]
+        ping_one(s$url, s$token, i, s$name)
+      }, character(1))
     })
     output$ping_out <- renderText(paste(lines, collapse = "\n"))
   })
 
   # ---- Validate data --------------------------------------------
   observeEvent(input$btn_validate, {
-    urls <- get_urls(input$urls)
-    if (!length(urls)) {
-      showNotification("Enter site URLs first.", type = "warning"); return()
+    sites <- active_sites()
+    if (!length(sites)) {
+      showNotification("No sites yet. Invite or add a site first.", type = "warning"); return()
     }
     if (is.null(rv$meta) || is.null(rv$meta$vars_spec)) {
       showNotification("Load an analysis script first.", type = "warning"); return()
     }
-    tok  <- trimws(input$token)
-    ss   <- lapply(urls, function(u) create_remote_server(u, tok))
+    ss <- lapply(sites, function(s) create_remote_server(s$url, s$token))
 
     withProgress(message = "Validating sites…", {
       v <- tryCatch(
@@ -267,15 +524,14 @@ server <- function(input, output, session) {
 
   # ---- Run analysis ---------------------------------------------
   observeEvent(input$btn_run, {
-    urls <- get_urls(input$urls)
-    if (!length(urls)) {
-      showNotification("Enter site URLs first.", type = "warning"); return()
+    sites <- active_sites()
+    if (!length(sites)) {
+      showNotification("No sites yet. Invite or add a site first.", type = "warning"); return()
     }
     if (is.null(rv$meta)) {
       showNotification("Load an analysis script first.", type = "warning"); return()
     }
-    tok    <- trimws(input$token)
-    ss     <- lapply(urls, function(u) create_remote_server(u, tok))
+    ss     <- lapply(sites, function(s) create_remote_server(s$url, s$token))
     script <- input$script_file$datapath
 
     withProgress(
@@ -322,7 +578,7 @@ server <- function(input, output, session) {
         h3("Federated Analysis Coordinator"),
         br(),
         p("① Load an analysis script  (.R file that follows the contract)"),
-        p("② Enter the site URLs"),
+        p("② Invite your sites (or add one manually)"),
         p("③ Ping → Validate → Run Analysis")
       ))
     }
@@ -387,8 +643,6 @@ server <- function(input, output, session) {
   })
 
   # ---- Register a renderer for every dynamic output ---------------
-  # Fires whenever rv$outputs changes (i.e. after Run Analysis).
-  # Uses local() to capture loop variables correctly.
   observeEvent(rv$outputs, {
     outputs <- rv$outputs
     if (is.null(outputs)) return()

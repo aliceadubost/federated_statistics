@@ -33,14 +33,16 @@ role <- if (length(role) > 0) role[1] else "coordinator"
 })()
 
 # ── CRAN packages needed by each role ────────────────────────────────
-# site:        shiny + processx (GUI), plumber + jsonlite (API server)
-# coordinator: shiny (GUI), httr + jsonlite (remote site connections)
-# fedstats itself declares httr + jsonlite as Imports — they will also
-# be pulled in when fedstats is installed below.
+# site:        shiny + processx (GUI), plumber + jsonlite (API server),
+#              sodium (invite verification + site keypair)
+# coordinator: shiny (GUI), httr + jsonlite (remote site connections),
+#              processx (registrar subprocess), sodium (invite signing)
+# fedstats itself declares httr + jsonlite + sodium as Imports — they
+# will also be pulled in when fedstats is installed below.
 cran_pkgs <- if (role == "site") {
-  c("shiny", "processx", "plumber", "jsonlite")
+  c("shiny", "processx", "plumber", "jsonlite", "sodium")
 } else {
-  c("shiny", "httr", "jsonlite")
+  c("shiny", "httr", "jsonlite", "processx", "sodium")
 }
 
 # ── Step A: CRAN packages ─────────────────────────────────────────────
@@ -81,7 +83,7 @@ if (requireNamespace("fedstats", quietly = TRUE)) {
 
   # When repos = NULL, R ignores dependencies = TRUE and won't fetch CRAN
   # packages automatically. Pre-install fedstats' declared Imports first.
-  fedstats_imports <- c("httr", "jsonlite")
+  fedstats_imports <- c("httr", "jsonlite", "sodium")
   need_imports <- fedstats_imports[!fedstats_imports %in% rownames(installed.packages())]
   if (length(need_imports) > 0) {
     cat(sprintf("  Installing fedstats dependencies: %s\n",
