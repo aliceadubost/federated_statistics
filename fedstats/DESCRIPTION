@@ -16,7 +16,8 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 Imports:
     httr,
-    jsonlite
+    jsonlite,
+    sodium
 Suggests:
     shiny,
     devtools,
