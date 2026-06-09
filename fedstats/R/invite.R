@@ -153,6 +153,27 @@ fed_verify <- function(message, signature, public_key) {
   )
 }
 
+#' Canonical message a site signs for a registration callback
+#'
+#' Shared by the site (to sign) and the registrar (to verify) so the
+#' signed bytes are identical on both ends. See DESIGN_invite_bundle.md
+#' section 5a.
+#'
+#' @param sid Site id from the invite.
+#' @param site_addr The site's own base URL.
+#' @param site_pk The site's base64url public key.
+#' @param ts Unix timestamp (integer seconds) of the request.
+#' @return A canonical JSON string.
+#' @export
+fed_register_message <- function(sid, site_addr, site_pk, ts) {
+  .canonical_json(list(
+    sid       = as.character(sid),
+    site_addr = as.character(site_addr),
+    site_pk   = as.character(site_pk),
+    ts        = as.integer(ts)
+  ))
+}
+
 # ---- invite create / parse -----------------------------------------
 
 #' Create a signed invite string
