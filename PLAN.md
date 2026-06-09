@@ -8,7 +8,7 @@
 | `alice/phase2-onboarding` | Phase 2 — Onboarding and connection UX |
 | `alice/phase3-polish` | Phase 3 — Reliability and polish |
 
-Each branch is cut from `main` and is independently shippable as a PR.
+The branches are **stacked**: `alice/phase1-security` is cut from `main`, `alice/phase2-onboarding` is built on Phase 1, and `alice/phase3-polish` will be built on Phase 2. Each phase is still independently testable and reviewable, but later phases contain the commits of earlier ones, so they are not independent PRs against `main`. Merge order is forced: Phase 1 first, then Phase 2, then Phase 3.
 
 ---
 
@@ -18,7 +18,7 @@ Each branch is cut from `main` and is independently shippable as a PR.
 
 2. **Safer AND no harder to use.** Security improvements must not add steps or friction for non-technical users (hospital IT staff, clinicians). If a fix would require extra manual steps, it must be automated or surfaced through the GUI.
 
-3. **Each phase is independently shippable.** Phases are sequenced by priority but not coupled. Phase 2 does not depend on Phase 1 being merged first. Each phase can be reviewed, tested, and deployed on its own.
+3. **Phases are stacked, and independently testable.** Phase 2 builds on Phase 1, and Phase 3 builds on Phase 2. Each phase is still independently testable and reviewable, but later phases contain the commits of earlier ones. Merge order is therefore forced: Phase 1 first, then Phase 2, then Phase 3.
 
 ---
 
@@ -46,6 +46,8 @@ Each branch is cut from `main` and is independently shippable as a PR.
 ---
 
 ### Phase 2 — Onboarding & Connection UX (`alice/phase2-onboarding`)
+
+**Builds on:** Phase 1. This branch is stacked on `alice/phase1-security`, so it contains the Phase 1 security commits. It is independently testable and reviewable, but must be merged after Phase 1.
 
 **Goal:** Replace the manual "email URLs and tokens" workflow with a single invite-bundle flow that a doctor can complete in under a minute.
 
