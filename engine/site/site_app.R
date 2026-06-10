@@ -283,6 +283,12 @@ server <- function(input, output, session) {
 
     showModal(modalDialog(
       title = "Join this study?",
+      p(strong("Intended site: "),
+        if (nzchar(p$name)) p$name else "(no label set)",
+        br(),
+        tags$span(class = "note",
+                  "This invite was issued for the site above. ",
+                  "If that is not you, do not join — you were sent the wrong invite.")),
       p(strong("Study: "), p$study),
       p(strong("Coordinator: "), p$coord),
       p(strong("Key fingerprint: "), tags$code(fp)),
