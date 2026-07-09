@@ -126,9 +126,15 @@ ping_one <- function(url, token, idx, name = "") {
       rows <- as.integer(unlist(httr::content(r, as = "parsed")$rows))
       sprintf("%s  [OK]   n = %d rows   %s", label, rows, url)
     } else {
-      sprintf("%s  [ERR]  HTTP %d   %s", label, httr::status_code(r), url)
+      friendly <- fed_friendly_http_error(status_code = httr::status_code(r))
+      sprintf("%s  [ERR]  %s   %s", label,
+             if (!is.null(friendly)) friendly
+             else sprintf("HTTP %d", httr::status_code(r)), url)
     }
-  }, error = function(e) sprintf("%s  [ERR]  %s", label, conditionMessage(e)))
+  }, error = function(e) {
+    friendly <- fed_friendly_http_error(e = e)
+    sprintf("%s  [ERR]  %s", label, if (!is.null(friendly)) friendly else conditionMessage(e))
+  })
 }
 
 # ---------------------------------------------------------------
