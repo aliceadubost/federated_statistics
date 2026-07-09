@@ -36,13 +36,14 @@ role <- if (length(role) > 0) role[1] else "coordinator"
 # site:        shiny + processx (GUI), plumber + jsonlite (API server),
 #              sodium (invite verification + site keypair)
 # coordinator: shiny (GUI), httr + jsonlite (remote site connections),
-#              processx (registrar subprocess), sodium (invite signing)
+#              processx (registrar subprocess), sodium (invite signing),
+#              future + promises (parallel, non-blocking site pings)
 # fedstats itself declares httr + jsonlite + sodium as Imports — they
 # will also be pulled in when fedstats is installed below.
 cran_pkgs <- if (role == "site") {
   c("shiny", "processx", "plumber", "jsonlite", "sodium", "httr")
 } else {
-  c("shiny", "httr", "jsonlite", "processx", "sodium")
+  c("shiny", "httr", "jsonlite", "processx", "sodium", "future", "promises")
 }
 
 # ── Step A: CRAN packages ─────────────────────────────────────────────

@@ -20,6 +20,8 @@ Imports:
     sodium
 Suggests:
     shiny,
+    future,
+    promises,
     devtools,
     roxygen2
 RoxygenNote: 7.3.3

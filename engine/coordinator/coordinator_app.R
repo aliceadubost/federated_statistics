@@ -25,10 +25,18 @@ suppressPackageStartupMessages({
   library(jsonlite)
   library(fedstats)
   library(processx)
+  library(future)
+  library(promises)
 })
 
 # Registry state-machine + persistence (sibling file; wd is this dir).
 source(file.path(getwd(), "registry.R"))
+
+# Ping runs each site's /health check in a background worker process so it
+# doesn't block this session's own reactivity (other buttons stay usable
+# while a ping is in flight) and so N sites take max(latency) instead of
+# sum(latency). Workers are torn down in the onStop() below.
+future::plan(future::multisession)
 
 # ---------------------------------------------------------------
 # Paths and configuration
@@ -72,6 +80,7 @@ registrar_proc <- tryCatch(.start_registrar(), error = function(e) NULL)
 onStop(function() {
   try(if (!is.null(registrar_proc) && registrar_proc$is_alive())
         registrar_proc$kill(), silent = TRUE)
+  try(future::plan(future::sequential), silent = TRUE)  # tear down ping workers
 })
 
 # Warn (in the launcher console) if the registry is world-readable.
@@ -136,6 +145,19 @@ ping_one <- function(url, token, idx, name = "") {
     sprintf("%s  [ERR]  %s", label, if (!is.null(friendly)) friendly else conditionMessage(e))
   })
 }
+
+# Ping every site in parallel (one future worker per site) instead of one
+# at a time. Resolves to a character vector of ping_one() result lines, in
+# the same order as `sites`.
+ping_sites_async <- function(sites) {
+  proms <- lapply(sites, function(s)
+    promises::future_promise(ping_one(s$url, s$token, 0, s$name)))
+  promises::promise_all(.list = proms) %...>% unlist
+}
+
+# Stale/offline threshold for the live status badge (item 3): a successful
+# ping older than this reads as "Stale" rather than "Connected".
+PING_STALE_S <- 120
 
 # ---------------------------------------------------------------
 # UI
@@ -254,7 +276,8 @@ server <- function(input, output, session) {
     val_txt     = NULL,   # text from standalone Validate
     console_log = NULL,   # captured cat()/print() output from analysis script
     reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
-    manual      = list()  # manual escape-hatch sites: list(name,url,token)
+    manual      = list(),  # manual escape-hatch sites: list(name,url,token)
+    ping_status = list()   # url -> list(ok, checked_at) from the last ping
   )
 
   # ---- Poll the registry file + drain registrar logs ------------
@@ -480,6 +503,10 @@ server <- function(input, output, session) {
   })
 
   # ---- Ping -----------------------------------------------------
+  # Async (future/promises): sites are pinged in parallel, in the
+  # background, so this session's own reactivity (other buttons, sidebar)
+  # doesn't freeze while pings are in flight. Wall-clock time is
+  # max(latency) across sites instead of sum(latency).
   observeEvent(input$btn_ping, {
     sites <- active_sites()
     if (!length(sites)) {
@@ -487,13 +514,22 @@ server <- function(input, output, session) {
                        type = "warning")
       return()
     }
-    withProgress(message = "Pinging sites…", {
-      lines <- vapply(seq_along(sites), function(i) {
-        s <- sites[[i]]
-        ping_one(s$url, s$token, i, s$name)
-      }, character(1))
+    progress <- shiny::Progress$new()
+    progress$set(message = "Pinging sites…")
+
+    ping_sites_async(sites) %...>% (function(lines) {
+      now <- Sys.time()
+      status <- rv$ping_status
+      for (i in seq_along(sites))
+        status[[sites[[i]]$url]] <- list(ok = grepl("\\[OK\\]", lines[[i]]),
+                                         checked_at = now)
+      rv$ping_status <- status
+      output$ping_out <- renderText(paste(lines, collapse = "\n"))
+      progress$close()
+    }) %...!% (function(e) {
+      showNotification(paste("Ping failed:", conditionMessage(e)), type = "error")
+      progress$close()
     })
-    output$ping_out <- renderText(paste(lines, collapse = "\n"))
   })
 
   # ---- Validate data --------------------------------------------
