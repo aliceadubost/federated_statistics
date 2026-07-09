@@ -22,10 +22,7 @@ VARS_SPEC <- list(
   age              = list(type = "numeric",     min = 18, max = 100),
   bmi              = list(type = "numeric",     min = 10, max = 80),
   sexM             = list(type = "binary"),
-  smoker           = list(type = "binary"),
   nrs_arm_preop    = list(type = "numeric",     min = 0,  max = 10),
-  eq5d_index_preop = list(type = "numeric",     min = -1, max = 1),
-  ndi_index_preop  = list(type = "numeric",     min = 0,  max = 100),
   diag_grp         = list(type = "categorical",
                            levels = c("radiculopathy", "myelopathy"))
 )
@@ -72,12 +69,9 @@ register_output("Validation", {
 s_age  <- fed_numeric(servers, "age")
 s_bmi  <- fed_numeric(servers, "bmi")
 s_nrs  <- fed_numeric(servers, "nrs_arm_preop")
-s_eq5d <- fed_numeric(servers, "eq5d_index_preop")
-s_ndi  <- fed_numeric(servers, "ndi_index_preop")
 
 # Binary variables (sum = count of 1s, mean = proportion)
 s_sex    <- fed_numeric(servers, "sexM")
-s_smoker <- fed_numeric(servers, "smoker")
 
 # Print a quick summary to the Console tab
 cat(sprintf("%-22s  n = %5d  mean (SD) = %.1f (%.1f)\n",
@@ -88,8 +82,6 @@ cat(sprintf("%-22s  n = %5d  mean (SD) = %.1f (%.1f)\n",
             "NRS arm preop:", s_nrs$n, s_nrs$mean, s_nrs$sd))
 cat(sprintf("%-22s  n = %5d  %.0f / %d (%.1f%%)\n",
             "Male sex:",      s_sex$n, s_sex$sum, s_sex$n, 100 * s_sex$mean))
-cat(sprintf("%-22s  n = %5d  %.0f / %d (%.1f%%)\n",
-            "Smoker:",        s_smoker$n, s_smoker$sum, s_smoker$n, 100 * s_smoker$mean))
 
 # ── Step 3: Breakdown by subgroup ────────────────────────────────────
 # fed_group_numeric() returns a named list keyed by group level.
@@ -106,18 +98,14 @@ for (g in names(grp))
 # ── ADAPT: add or remove rows to match your variables ────────────────
 tbl1 <- data.frame(
   Variable = c(
-    "Age (years)", "BMI (kg/m²)", "Male sex (%)", "Smoker (%)",
-    "NRS arm — preop", "EQ-5D index — preop", "NDI index — preop"
+    "Age (years)", "BMI (kg/m²)", "Male sex (%)", "NRS arm — preop"
   ),
-  N = c(s_age$n, s_bmi$n, s_sex$n, s_smoker$n, s_nrs$n, s_eq5d$n, s_ndi$n),
+  N = c(s_age$n, s_bmi$n, s_sex$n, s_nrs$n),
   "Mean (SD) or n (%)" = c(
     sprintf("%.1f (%.1f)", s_age$mean,    s_age$sd),
     sprintf("%.1f (%.1f)", s_bmi$mean,    s_bmi$sd),
     sprintf("%.0f (%.1f%%)", s_sex$sum,   100 * s_sex$mean),
-    sprintf("%.0f (%.1f%%)", s_smoker$sum, 100 * s_smoker$mean),
-    sprintf("%.1f (%.1f)", s_nrs$mean,    s_nrs$sd),
-    sprintf("%.2f (%.2f)", s_eq5d$mean,   s_eq5d$sd),
-    sprintf("%.1f (%.1f)", s_ndi$mean,    s_ndi$sd)
+    sprintf("%.1f (%.1f)", s_nrs$mean,    s_nrs$sd)
   ),
   check.names = FALSE, stringsAsFactors = FALSE
 )

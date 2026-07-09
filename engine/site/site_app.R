@@ -26,12 +26,18 @@ suppressPackageStartupMessages({
 .fedstats_ok <- requireNamespace("fedstats", quietly = TRUE) && file.exists(.api_script)
 
 # ---- Auto-detect CSV files ------------------------------------------
+# A browser file-input dialog can't be told what folder to open (that's a
+# browser security restriction — no site can override it, for anyone). So
+# instead: any CSV dropped in <project root>/data/ is auto-detected and
+# offered as a dropdown, skipping the OS file dialog entirely. Create the
+# folder so it's a visible, obvious drop target from a fresh checkout.
+.data_dir <- file.path(.app_root, "data")
+if (!dir.exists(.data_dir))
+  dir.create(.data_dir, recursive = TRUE, showWarnings = FALSE)
+
 .scan_csvs <- function() {
-  data_dir <- file.path(.app_root, "data")
-  if (dir.exists(data_dir)) {
-    found <- list.files(data_dir, pattern = "\\.csv$", full.names = TRUE)
-    if (length(found)) return(found)
-  }
+  found <- list.files(.data_dir, pattern = "\\.csv$", full.names = TRUE)
+  if (length(found)) return(found)
   list.files(.app_root, pattern = "\\.csv$", full.names = TRUE, recursive = FALSE)
 }
 .csv_files <- .scan_csvs()
@@ -369,7 +375,10 @@ server <- function(input, output, session) {
     } else {
       tagList(
         div(style = "color:#c53030; font-size:.83em; margin-bottom:4px;",
-            "No CSV found in the data folder"),
+            sprintf(
+              "No CSV found. Put your file in this folder, then restart Start Site: %s",
+              .data_dir
+            )),
         fileInput("data_file_upload", "Data file (.csv)",
                   accept = ".csv", buttonLabel = "Browse…",
                   placeholder = "No file selected")
