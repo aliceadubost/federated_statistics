@@ -43,12 +43,18 @@ if (!dir.exists(.data_dir))
 .csv_files <- .scan_csvs()
 
 # ---- Tailscale IP ---------------------------------------------------
-.ts_ip <- tryCatch({
-  cmd <- if (.Platform$OS.type == "windows") "tailscale ip -4"
-         else "tailscale ip -4 2>/dev/null"
-  ip  <- trimws(system(cmd, intern = TRUE, ignore.stderr = TRUE))
-  if (length(ip) && nzchar(ip[1])) ip[1] else ""
-}, error = function(e) "")
+# A function, not a one-shot constant: if Tailscale connects *after* this
+# app is already open, a static value computed once at startup would never
+# update — the operator would see "not detected" indefinitely and need to
+# restart the app. server() below polls this on a timer instead.
+.get_ts_ip <- function() {
+  tryCatch({
+    cmd <- if (.Platform$OS.type == "windows") "tailscale ip -4"
+           else "tailscale ip -4 2>/dev/null"
+    ip  <- trimws(system(cmd, intern = TRUE, ignore.stderr = TRUE))
+    if (length(ip) && nzchar(ip[1])) ip[1] else ""
+  }, error = function(e) "")
+}
 
 # ---- Site config persistence ----------------------------------------
 .load_config <- function() {
@@ -65,9 +71,9 @@ if (!dir.exists(.data_dir))
 }
 
 # Register this site back to its coordinator. Returns a status string.
-.do_register <- function(cfg, port) {
+.do_register <- function(cfg, port, ts_ip) {
   if (!.fedstats_ok) return("fedstats not installed — cannot register.")
-  addr <- if (nzchar(.ts_ip)) sprintf("http://%s:%d", .ts_ip, port)
+  addr <- if (nzchar(ts_ip)) sprintf("http://%s:%d", ts_ip, port)
           else sprintf("http://localhost:%d", port)
   ts  <- as.integer(Sys.time())
   msg <- fedstats::fed_register_message(cfg$sid, addr, cfg$site_pub, ts)
@@ -188,7 +194,8 @@ server <- function(input, output, session) {
     status       = "stopped",   # "stopped" | "starting" | "running"
     config       = .load_config(),
     join_status  = NULL,        # text shown under the Join box
-    need_register = FALSE       # register once the server reaches "running"
+    need_register = FALSE,      # register once the server reaches "running"
+    ts_ip        = .get_ts_ip() # live Tailscale IP, refreshed below
   )
 
   # Prefill the token field from a saved config on first load.
@@ -196,6 +203,14 @@ server <- function(input, output, session) {
     cfg <- isolate(rv$config)
     if (!is.null(cfg) && !is.null(cfg$token))
       updateTextInput(session, "token", value = cfg$token)
+  })
+
+  # Re-check Tailscale every few seconds so connecting *after* this app is
+  # already open is picked up without restarting it.
+  ts_timer <- reactiveTimer(3000)
+  observe({
+    ts_timer()
+    rv$ts_ip <- .get_ts_ip()
   })
 
   timer <- reactiveTimer(500)
@@ -218,7 +233,8 @@ server <- function(input, output, session) {
         rv$status <- "running"
         # Auto-register once the server is up, if we joined via an invite.
         if (isolate(rv$need_register) && !is.null(isolate(rv$config))) {
-          msg <- .do_register(isolate(rv$config), as.integer(isolate(input$port)))
+          msg <- .do_register(isolate(rv$config), as.integer(isolate(input$port)),
+                             isolate(rv$ts_ip))
           rv$join_status <- msg
           rv$log <- c(rv$log, paste0("\n--- ", msg, " ---"))
           rv$need_register <- FALSE
@@ -354,10 +370,10 @@ server <- function(input, output, session) {
   output$address_ui <- renderUI({
     if (rv$status == "stopped") return(NULL)
     port <- isolate(input$port)
-    if (nzchar(.ts_ip)) {
+    if (nzchar(rv$ts_ip)) {
       div(class = "addr",
           div(class = "addr-lbl", "Your address (the coordinator reaches you here)"),
-          div(class = "addr-url", sprintf("http://%s:%d", .ts_ip, port)))
+          div(class = "addr-url", sprintf("http://%s:%d", rv$ts_ip, port)))
     } else {
       div(class = "addr",
           div(class = "addr-lbl", "Local address (Tailscale not detected)"),
