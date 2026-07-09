@@ -33,128 +33,25 @@ Example:
 tailscale netcheck
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-|--------------------------------- OUTDATED ---------------------------------|
-
 =====================================================
-2. INSTALL R
+2. RUNNING THE APP (current GUI-based flow)
 =====================================================
 
-Linux / Ubuntu:
-sudo apt update
-sudo apt install -y r-base r-base-dev
+There is no manual R/package install step and no CLI workflow anymore —
+both roles are Shiny apps started from the Run/ launchers, which install
+any missing R packages automatically on first launch.
 
-macOS:
-brew install r
+Site (each hospital computer):
+1. Open Run/Mac, Run/Windows, or Run/Linux and double-click "Start Site".
+2. Paste the invite the coordinator sent you, click Join, confirm.
+3. Select your CSV data file, click Start Server.
+4. Your site registers itself with the coordinator automatically.
 
-Windows:
-https://cran.r-project.org/bin/windows/base/
+Coordinator (the researcher):
+1. Double-click "Start Coordinator" in the same Run/ folder.
+2. Click "Invite a site" for each site, copy the invite, and send it to
+   that site's operator. Sites appear in the table automatically as they
+   join — no addresses or tokens to collect or type by hand.
+3. Load an analysis script, then Ping -> Validate -> Run Analysis.
 
-
-=====================================================
-3. INSTALL R PACKAGES
-=====================================================
-
-Linux / Ubuntu:
-sudo apt update
-sudo apt install -y libcurl4-openssl-dev libsodium-dev libssl-dev libxml2-dev
-Rscript -e 'install.packages(c("curl","sodium","webutils","plumber","jsonlite","httr2","readxl"), repos="https://cloud.r-project.org")'
-
-macOS:
-Rscript -e 'install.packages(c("plumber","jsonlite","httr2","readxl"), repos="https://cloud.r-project.org")'
-
-Windows PowerShell:
-Rscript -e "install.packages(c('plumber','jsonlite','httr2','readxl'), repos='https://cloud.r-project.org')"
-
-
-No Rscript?
-Get-ChildItem "C:\Program Files\R"
- 
-Get-ChildItem "C:\Program Files\R\R-4.5.2\bin"
- 
-$env:Path += ";C:\Program Files\R\R-4.5.0\bin"
- 
-
-=====================================================
-4. START THE SITE SERVER
-=====================================================
-
-On each distributed computer, put these files in the same folder:
-server.R
-api_server.R
-site CSV file
-
-Example Linux/macOS:
-FED_DATA_FILE=norway.csv \
-FED_PORT=8000 \
-Rscript api_server.R
-
-With token (optional):
-FED_DATA_FILE=norway.csv \
-FED_PORT=8000 \
-FED_TOKEN=swespine2026 \
-Rscript api_server.R
-
-Keep this terminal open!
-
-Expected output:
-Loaded XXXX rows. Listening on port 8000.
-Running plumber API at http://0.0.0.0:8000
-
-
-Windows PowerShell:
-$env:FED_DATA_FILE="norway.csv"
-$env:FED_PORT="8000"
-$env:FED_TOKEN="swespine2026"
-Rscript api_server.R
-
-
-=====================================================
-5. COORDINATOR RUNS THE ANALYSIS
-=====================================================
-
-The coordinator collects the Tailscale IPs from all computers from the tailscale webpage. Example:
-Sweden:  100.74.226.3
-Norway:  100.86.16.91
-Denmark: 100.91.8.22
-Finland: 100.64.55.33
-
-Run:
-FED_MODE=remote \
-FED_SITE_URLS=http://100.74.226.3:8000,http://100.86.16.91:8000,http://100.91.8.22:8000,http://100.64.55.33:8000 \
-Rscript run.R
-
-With token:
-FED_MODE=remote \
-FED_API_TOKEN=swespine2026 \
-FED_SITE_URLS=http://100.74.226.3:8000,http://100.86.16.91:8000,http://100.91.8.22:8000,http://100.64.55.33:8000 \
-Rscript run.R
-
-
-=====================================================
-6. EXPECTED RESULT
-=====================================================
-
-The coordinator should print:
-Descriptive statistics
-Welch t-test
-Chi-square test
-Linear regression
-Logistic regression
-
-
-
-
-
-Shiny app, victor has a server
+Full details: see README.md ("Getting started").
