@@ -106,6 +106,15 @@ check_token <- function(req) {
   invisible(NULL)
 }
 
+# Run before each handler's own tryCatch so an auth failure reports 401
+# (distinct from a 400 validation error further into the same handler).
+# Returns NULL if authorized, or the error payload to return early otherwise
+# — callers do `auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)`.
+check_auth_401 <- function(req, res) {
+  tryCatch({ check_token(req); NULL },
+          error = function(e) { res$status <- 401; list(error = conditionMessage(e)) })
+}
+
 # ------------------------------------------------------------------
 # Plumber API definition
 # ------------------------------------------------------------------
@@ -124,8 +133,8 @@ pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE, null = "null",
 
 # ---- /termnames ------------------------------------------------
 pr$handle("POST", "/termnames", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     if (!is.null(body$formula))
       stop("formula field no longer accepted; send model_spec instead.")
@@ -139,8 +148,8 @@ pr$handle("POST", "/termnames", function(req, res) {
 
 # ---- /grad_hess ------------------------------------------------
 pr$handle("POST", "/grad_hess", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     if (!is.null(body$formula))
       stop("formula field no longer accepted; send model_spec instead.")
@@ -177,8 +186,8 @@ pr$handle("POST", "/grad_hess", function(req, res) {
 
 # ---- /lm_suffstats ---------------------------------------------
 pr$handle("POST", "/lm_suffstats", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     if (!is.null(body$formula))
       stop("formula field no longer accepted; send model_spec instead.")
@@ -207,8 +216,8 @@ pr$handle("POST", "/lm_suffstats", function(req, res) {
 
 # ---- /summary_numeric ------------------------------------------
 pr$handle("POST", "/summary_numeric", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body    <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     varname <- .validate_varname(body$varname)
     if (!varname %in% names(site_data))
@@ -223,8 +232,8 @@ pr$handle("POST", "/summary_numeric", function(req, res) {
 
 # ---- /group_summaries ------------------------------------------
 pr$handle("POST", "/group_summaries", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body     <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     varname  <- .validate_varname(body$varname)
     groupvar <- .validate_varname(body$groupvar)
@@ -248,8 +257,8 @@ pr$handle("POST", "/group_summaries", function(req, res) {
 
 # ---- /counts_2x2 -----------------------------------------------
 pr$handle("POST", "/counts_2x2", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     xvar <- .validate_varname(body$xvar)
     yvar <- .validate_varname(body$yvar)
@@ -277,8 +286,8 @@ pr$handle("POST", "/counts_2x2", function(req, res) {
 # isTRUE() checks on the coordinator side after httr parses with
 # simplifyVector=FALSE.
 pr$handle("POST", "/validate", function(req, res) {
+  auth <- check_auth_401(req, res); if (!is.null(auth)) return(auth)
   tryCatch({
-    check_token(req)
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     if (!is.null(body$formula))
       stop("formula field no longer accepted; send model_spec instead.")

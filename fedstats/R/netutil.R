@@ -92,6 +92,40 @@ fed_check_file_perms <- function(path) {
   ""
 }
 
+#' Translate a low-level HTTP/connection failure into a friendly message
+#'
+#' Only the three specific failure modes named in the Phase 3 charter are
+#' translated; anything else returns \code{NULL} so the caller keeps its
+#' existing (more specific) message — e.g. a 400 from a \code{min_n}
+#' validation failure already carries a useful, specific message that must
+#' not be replaced by a generic one.
+#'
+#' @param e Condition object from a failed \code{httr::POST()}/\code{GET()}
+#'   call (connection-level failure), or \code{NULL} if the call completed
+#'   but returned a non-2xx status.
+#' @param status_code HTTP status code, or \code{NULL} for a connection-level
+#'   failure.
+#'
+#' @return A friendly message string, or \code{NULL} if this isn't one of
+#'   the recognised cases.
+#' @export
+fed_friendly_http_error <- function(e = NULL, status_code = NULL) {
+  if (!is.null(status_code)) {
+    if (status_code == 401)
+      return("Authentication failed — check your site's token.")
+    return(NULL)
+  }
+  if (!is.null(e)) {
+    msg <- conditionMessage(e)
+    if (grepl("timeout|timed out", msg, ignore.case = TRUE))
+      return("Site not responding — it may be offline.")
+    if (grepl("Failed to connect|Connection refused|couldn't connect|No route to host",
+              msg, ignore.case = TRUE))
+      return("Site unreachable — is the server running?")
+  }
+  NULL
+}
+
 #' Decide the interface to bind a server to
 #'
 #' Binds to the Tailscale interface when present; otherwise signals a

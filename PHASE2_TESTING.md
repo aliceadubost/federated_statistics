@@ -313,9 +313,9 @@ unit-tested in Sections 2–3.
 
 ## 10. Backward-compatibility — unchanged server accepts a per-site token (automated)
 
-Confirms the Phase 1 `api_server.R` (unchanged) authenticates a per-site token
-and rejects a wrong one. Run from the project root with Tailscale up; **pick one
-of the four CSVs when prompted**:
+Confirms `api_server.R` authenticates a per-site token and rejects a wrong
+one. Run from the project root with Tailscale up; **pick one of the four CSVs
+when prompted**:
 
 ```r
 library(fedstats); library(processx); library(httr)
@@ -329,9 +329,19 @@ url <- sprintf("http://%s:8123", host)
 n_total <- create_remote_server(url, tok)$summary_numeric("age")$n
 stopifnot(n_total > 0)                     # correct token works
 stopifnot(tryCatch({ create_remote_server(url, "WRONG")$summary_numeric("age"); FALSE },
-                   error = function(e) grepl("401|nauthor", conditionMessage(e))))
+                   error = function(e) identical(conditionMessage(e),
+                     "Authentication failed — check your site's token.")))
 p$kill(); cat("Section 10 OK — server auth unchanged\n")
 ```
+
+> **Phase 3 update:** a wrong token used to surface as a raw
+> `Remote call failed [400] ... Unauthorized: invalid token.` (matched loosely
+> via `grepl("401|nauthor", ...)`). Phase 3 (1) makes every protected endpoint
+> report auth failures as **HTTP 401** specifically (previously only `/health`
+> did — the others conflated auth failures with ordinary 400 validation
+> errors), and (2) translates that into the friendly message asserted above.
+> Other error types (e.g. `min_n` violations, unknown variables) are
+> unaffected — they still return 400 with their original specific message.
 
 ---
 

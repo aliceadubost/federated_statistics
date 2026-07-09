@@ -65,22 +65,36 @@
     httr::add_headers(`Content-Type` = "application/json")
   }
 
-  res <- httr::POST(
-    url,
-    headers,
-    # digits = 15: jsonlite's default (4) rounds to 4 decimal *places*, not
-    # significant figures, silently zeroing small values (e.g. Newton-Raphson
-    # beta/grad entries) and truncating larger ones. Preserve full precision.
-    body   = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null", digits = 15),
-    encode = "raw"
+  # Configurable request timeout — without one, a site going unreachable
+  # mid-call hangs the caller (and the coordinator's Shiny session)
+  # indefinitely. FED_REQUEST_TIMEOUT_S follows the existing FED_* env var
+  # convention (FED_REGISTRAR_PORT, FED_INVITE_TTL_DAYS, FED_MIN_N).
+  timeout_s <- as.numeric(Sys.getenv("FED_REQUEST_TIMEOUT_S", "30"))
+
+  res <- tryCatch(
+    httr::POST(
+      url,
+      headers,
+      # digits = 15: jsonlite's default (4) rounds to 4 decimal *places*, not
+      # significant figures, silently zeroing small values (e.g. Newton-Raphson
+      # beta/grad entries) and truncating larger ones. Preserve full precision.
+      body   = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null", digits = 15),
+      encode = "raw",
+      httr::timeout(timeout_s)
+    ),
+    error = function(e) {
+      friendly <- fed_friendly_http_error(e = e)
+      stop(if (!is.null(friendly)) friendly else conditionMessage(e), call. = FALSE)
+    }
   )
 
   if (httr::status_code(res) >= 300) {
-    stop(sprintf(
+    friendly <- fed_friendly_http_error(status_code = httr::status_code(res))
+    stop(if (!is.null(friendly)) friendly else sprintf(
       "Remote call failed [%d] %s\n%s",
       httr::status_code(res), url,
       httr::content(res, as = "text", encoding = "UTF-8")
-    ))
+    ), call. = FALSE)
   }
 
   httr::content(res, as = "parsed", type = "application/json")
