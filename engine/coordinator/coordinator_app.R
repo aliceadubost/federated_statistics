@@ -159,6 +159,16 @@ ping_sites_async <- function(sites) {
 # ping older than this reads as "Stale" rather than "Connected".
 PING_STALE_S <- 120
 
+# Pure function (no Shiny dependency) so it's directly unit-testable:
+# given a ping_status entry, returns "connected" / "stale" / "offline", or
+# NULL if the site has never been pinged.
+ping_badge_state <- function(st, now = Sys.time()) {
+  if (is.null(st)) return(NULL)
+  if (!isTRUE(st$ok)) return("offline")
+  age <- as.numeric(difftime(now, st$checked_at, units = "secs"))
+  if (age < PING_STALE_S) "connected" else "stale"
+}
+
 # ---------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------
@@ -380,6 +390,19 @@ server <- function(input, output, session) {
         onclick = sprintf("Shiny.setInputValue('%s', %s, {priority:'event'})",
                           inp, jsonlite::toJSON(val, auto_unbox = TRUE)))
 
+    # Live reachability badge from the last Ping — additive to the
+    # invite-state badge above (that reflects invite lifecycle, this
+    # reflects "did it actually answer recently"). Logic lives in the pure
+    # ping_badge_state() so it's unit-testable outside Shiny.
+    ping_badge <- function(url) {
+      state <- ping_badge_state(rv$ping_status[[url]])
+      if (is.null(state)) return(NULL)
+      switch(state,
+        connected = span(class = "sbadge sb-ok",   "Connected"),
+        stale     = span(class = "sbadge sb-info", "Stale"),
+        offline   = span(class = "sbadge sb-warn", "Offline"))
+    }
+
     rows <- list()
     if (!is.null(reg)) for (sid in names(reg$sites)) {
       r <- reg$sites[[sid]]
@@ -391,6 +414,7 @@ server <- function(input, output, session) {
         tags$td(if (nzchar(r$name)) r$name else "(unnamed)"),
         tags$td(if (!is.null(r$site_addr)) r$site_addr else "—"),
         tags$td(badge(r$invite_state, r$pending)),
+        tags$td(if (!is.null(r$site_addr)) ping_badge(r$site_addr)),
         tags$td(actions))
     }
     if (length(rv$manual)) for (i in seq_along(rv$manual)) {
@@ -399,6 +423,7 @@ server <- function(input, output, session) {
         tags$td(if (nzchar(m$name)) m$name else "(manual)"),
         tags$td(m$url),
         tags$td(span(class = "sbadge sb-muted", "Manual")),
+        tags$td(ping_badge(m$url)),
         tags$td(act_btn("Remove", "btn-danger", "manual_remove", i)))
     }
     if (!length(rows))
@@ -406,7 +431,7 @@ server <- function(input, output, session) {
 
     tags$table(class = "sites-tbl",
       tags$thead(tags$tr(tags$th("Name"), tags$th("Address"),
-                         tags$th("Status"), tags$th(""))),
+                         tags$th("Status"), tags$th("Reachability"), tags$th(""))),
       tags$tbody(rows))
   })
 
