@@ -244,6 +244,17 @@ Section 12.
 
 ## 8. End-to-end onboarding smoke test (GUI)
 
+> **Note:** `demo_descriptives.R`'s `VARS_SPEC` originally referenced
+> `smoker`, `eq5d_index_preop`, `ndi_index_preop` — columns that don't exist
+> in the four real site CSVs (`denmark/finland/norway/sweden.csv`, schema in
+> the table above). Loading it as-written would fail **8c** with "variable
+> not found" errors. Trimmed `VARS_SPEC` (and the downstream summary/table
+> code) down to the columns that actually exist: `age`, `bmi`, `sexM`,
+> `nrs_arm_preop`, `diag_grp`. Verified standalone against all four CSVs:
+> `Validation: PASS` (3 non-blocking warnings — a few patients aged 9–17
+> fall outside the `age` min=18 sanity range) and the Table 1 output
+> populates correctly.
+
 With all four sites online (Section 7):
 
 - [ ] **8a** Load `analysis/templates/demo_descriptives.R` on the coordinator.
@@ -469,9 +480,9 @@ Phase 1 established, now confirmed through the Phase 2 onboarding path.
 
 | Item | Result | Notes |
 |------|--------|-------|
-| 1 Invite format & crypto (automated) | | |
-| 2 Registry state machine (automated) | | |
-| 3 Registrar endpoint auth + rate limit (automated) | | |
+| 1 Invite format & crypto (automated) | PASS | invite len 448, prefix `FEDSTAT2.` |
+| 2 Registry state machine (automated) | PASS | full transition set exercised |
+| 3 Registrar endpoint auth + rate limit (automated) | PASS | 401/404/429 all confirmed on Tailscale-bound listener |
 | 4 Coordinator GUI — invites & registry | | |
 | 5 Site Join flow (Denmark) | | |
 | 6 UX timing — onboard in < 60 s | | secs: ___ |
@@ -484,6 +495,17 @@ Phase 1 established, now confirmed through the Phase 2 onboarding path.
 | 9e Leaked-invite collision → approval | | |
 | 9f TOFU key-change warning | | |
 | 9g Optional fingerprint matches | | |
-| 10 Backward-compat server auth (automated) | | |
+| 10 Backward-compat server auth (automated) | PASS | n=4169 (denmark.csv), wrong token → 401 |
 | 11 Phase 1 mechanisms intact (binding/min_n/protocol) | | |
-| 12 FINAL cross-phase regression (5 analyses) | | |
+| 12 FINAL cross-phase regression (5 analyses) | PASS* | see note below |
+
+\* **Section 12 initially FAILED §12.6's logistic-regression cross-check**
+(coefficients differed from pooled `glm()` by up to 2.4e-5, exceeding the
+1e-6 tolerance). Root cause: `jsonlite::toJSON()`'s default `digits = 4`
+rounds to 4 **decimal places**, not significant figures — it was silently
+zeroing gradient/beta entries under 5e-5 and truncating others on *every*
+Newton-Raphson round trip (`fedstats/R/remote.R` request body and
+`engine/site/api_server.R` response serializer both omitted `digits`).
+Fixed by setting `digits = 15` on both sides; re-ran Sections 3, 10, 12 in
+full afterward with no regressions. All five federated analyses now match
+the pooled base-R baseline within 1e-6.
