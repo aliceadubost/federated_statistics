@@ -5,6 +5,16 @@ title Federated Statistics — Coordinator
 :: Go to project root (parent of this windows\ folder)
 cd /d "%~dp0..\.."
 
+:: R on Windows refuses to start ("Erreur fatale : 'R_TempDir' contains
+:: space") when TEMP/TMP contains a space — which happens whenever the
+:: Windows user name has one (e.g. "C:\Users\Alice Alonso\..."). The usual
+:: fix (switching to the short 8.3 path form) doesn't help on systems where
+:: 8.3 name generation is disabled (the modern default), so use a fixed,
+:: always-space-free temp folder instead.
+set "TEMP=%SystemDrive%\fedstats_rtmp"
+set "TMP=%SystemDrive%\fedstats_rtmp"
+if not exist "%TEMP%" mkdir "%TEMP%" >nul 2>&1
+
 echo.
 echo  +--------------------------------------------+
 echo  ^|   Federated Statistics — Coordinator       ^|
