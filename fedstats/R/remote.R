@@ -68,7 +68,10 @@
   res <- httr::POST(
     url,
     headers,
-    body   = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null"),
+    # digits = 15: jsonlite's default (4) rounds to 4 decimal *places*, not
+    # significant figures, silently zeroing small values (e.g. Newton-Raphson
+    # beta/grad entries) and truncating larger ones. Preserve full precision.
+    body   = jsonlite::toJSON(body, auto_unbox = TRUE, null = "null", digits = 15),
     encode = "raw"
   )
 

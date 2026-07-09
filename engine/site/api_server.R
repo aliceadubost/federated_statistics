@@ -114,6 +114,14 @@ check_token <- function(req) {
 
 pr <- plumber::Plumber$new()
 
+# jsonlite::toJSON()'s default `digits = 4` rounds to 4 *decimal places*,
+# not significant figures — it silently zeroes any value under 5e-5 (e.g.
+# small gradient/beta entries) and truncates larger ones. That corrupts the
+# iterative Newton-Raphson exchange (beta/grad/hess) between coordinator
+# and site. Use full double precision on every response.
+pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE, null = "null",
+                                           na = "null", digits = 15))
+
 # ---- /termnames ------------------------------------------------
 pr$handle("POST", "/termnames", function(req, res) {
   tryCatch({
@@ -283,7 +291,7 @@ pr$handle("POST", "/validate", function(req, res) {
     res$status <- 400
     list(error = conditionMessage(e))
   })
-}, serializer = plumber::serializer_json(auto_unbox = TRUE, null = "null", na = "null"))
+}, serializer = plumber::serializer_json(auto_unbox = TRUE, null = "null", na = "null", digits = 15))
 
 # ---- /health (simple ping) -------------------------------------
 pr$handle("GET", "/health", function(req, res) {
