@@ -69,32 +69,20 @@ echo ""
 # ── Step 3 of 3: Tailscale ──────────────────────────────────
 echo "[ Step 3 of 3 ]  Checking Tailscale..."
 
-MY_IP=$(tailscale ip -4 2>/dev/null | head -1)
+MY_IP=""
+if command -v tailscale &>/dev/null; then
+  MY_IP=$(tailscale ip -4 2>/dev/null | head -1)
+fi
 
 if [ -n "$MY_IP" ]; then
   echo "  ✓  Tailscale connected.  Your IP: $MY_IP"
 else
-  if ! tailscale status &>/dev/null 2>&1; then
-    echo "  Tailscale daemon is not running — attempting to start it..."
-    sudo tailscaled &>/dev/null &
-    sleep 3
-  fi
-  MY_IP=$(tailscale ip -4 2>/dev/null | head -1)
-  if [ -z "$MY_IP" ]; then
-    echo "  Tailscale is not connected.  Running 'tailscale up'..."
-    sudo tailscale up
-    MY_IP=$(tailscale ip -4 2>/dev/null | head -1)
-  fi
-  if [ -n "$MY_IP" ]; then
-    echo "  ✓  Tailscale connected.  Your IP: $MY_IP"
-  else
-    echo ""
-    echo "  ⚠  Could not connect to Tailscale automatically."
-    echo "     Run:  sudo tailscale up"
-    echo "     Then close this terminal and re-run this script."
-    echo ""
-    read -rp "  Press Enter to continue anyway..."
-  fi
+  echo ""
+  echo "  ⚠  Tailscale is not running or not connected."
+  echo "     Run:  sudo tailscale up"
+  echo "     Or download Tailscale:  https://tailscale.com/download/linux"
+  echo ""
+  read -rp "  Press Enter to continue anyway..."
 fi
 echo ""
 
