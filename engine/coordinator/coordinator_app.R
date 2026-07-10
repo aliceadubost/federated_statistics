@@ -165,6 +165,17 @@ build_onboarding_message <- function(study, kit_link, invite_link) {
   )
 }
 
+# Pure function (no Shiny dependency): case-/whitespace-insensitive check
+# for whether `name` is already used by a site in the registry. Two sites
+# named "Sweden" would be indistinguishable in the table and in any
+# message referring to them by name, so this is enforced at invite-creation
+# time, not just cosmetically discouraged.
+site_name_exists <- function(reg, name) {
+  if (is.null(reg) || !length(reg$sites)) return(FALSE)
+  existing <- vapply(reg$sites, function(r) tolower(trimws(r$name)), character(1))
+  tolower(trimws(name)) %in% existing
+}
+
 ping_one <- function(url, token, idx, name = "") {
   label <- if (nzchar(name)) name else paste("Site", idx)
   tryCatch({
@@ -365,14 +376,20 @@ ui <- fluidPage(
     sidebarPanel(
       width = 5,
 
-      # ---- Step 1: analysis script ----
-      div(class = "step", "① Analysis script"),
+      # ---- Study (set once, independent of any script — reused by every
+      # invite so all sites always share the same name automatically) ----
+      div(class = "step", "Study"),
+      textInput("study_name", NULL, value = "Federated study", width = "100%"),
+
+      # ---- Analysis script (no required order relative to Sites below —
+      # invite people whenever, load/swap scripts whenever) ----
+      div(class = "step", "Analysis script"),
       fileInput("script_file", NULL, accept = ".R",
                 buttonLabel = "Browse…", placeholder = "No script selected"),
       uiOutput("script_meta_ui"),
 
-      # ---- Step 2: sites ----
-      div(class = "step", "② Sites"),
+      # ---- Sites ----
+      div(class = "step", "Sites"),
       uiOutput("registrar_status_ui"),
       div(style = "margin:8px 0;",
           actionButton("btn_invite", "Invite a site",
@@ -560,8 +577,9 @@ server <- function(input, output, session) {
   observeEvent(input$btn_invite, {
     showModal(modalDialog(
       title = "Invite a site",
-      textInput("inv_study", "Study name",
-                value = if (!is.null(rv$meta)) rv$meta$title else "Federated study"),
+      p(class = "note", style = "margin-top:0;",
+        "Study: ", strong(trimws(input$study_name)),
+        " — change it in the sidebar if that's wrong."),
       textInput("inv_name", "Site name (label)", placeholder = "e.g. Karolinska"),
       if (!nzchar(COORD_ADDR))
         div(class = "sbadge sb-warn",
@@ -573,7 +591,19 @@ server <- function(input, output, session) {
 
   observeEvent(input$inv_make, {
     name  <- trimws(input$inv_name)
-    study <- trimws(input$inv_study)
+    study <- trimws(input$study_name)
+
+    if (!nzchar(name)) {
+      showNotification("Enter a site name.", type = "warning"); return()
+    }
+    if (site_name_exists(rv$reg, name)) {
+      showNotification(
+        sprintf('A site named "%s" already exists — pick a different name, or revoke the existing one first.', name),
+        type = "error", duration = 8)
+      return()
+    }
+    if (!nzchar(study)) study <- "Federated study"
+
     sid   <- fed_sid()
     token <- fed_token()
     exp   <- as.integer(Sys.time()) + INVITE_TTL_DAYS * 86400L
