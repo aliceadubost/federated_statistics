@@ -7,12 +7,11 @@
 #   VARS_SPEC       — used for pre-analysis validation
 #   register_output(name, value, type, caption) — drives dynamic tabs
 #
-# Phase 2: sites onboard via signed invite bundles instead of pasted
-# URLs. This app runs a background registrar subprocess (registrar.R)
-# that receives site registration callbacks, and polls the registry
-# file to display registered sites. Per-site tokens are read from the
-# registry; a manual-add escape hatch preserves the old shared-token
-# workflow for backward compatibility.
+# Sites onboard via signed invite bundles — no pasted URLs or manually
+# typed tokens. This app runs a background registrar subprocess
+# (registrar.R) that receives site registration callbacks, and polls the
+# registry file to display registered sites. Per-site tokens are read
+# from the registry.
 #
 # Start with the launcher (double-click):
 #   Run/Mac/Start Coordinator.command  (macOS)
@@ -245,9 +244,7 @@ ui <- fluidPage(
       uiOutput("registrar_status_ui"),
       div(style = "margin:6px 0;",
           actionButton("btn_invite", "Invite a site",
-                       class = "btn-primary btn-xs"),
-          actionButton("btn_add_manual", "Add manually",
-                       class = "btn-default btn-xs")),
+                       class = "btn-primary btn-xs")),
       uiOutput("sites_table_ui"),
 
       br(),
@@ -286,7 +283,6 @@ server <- function(input, output, session) {
     val_txt     = NULL,   # text from standalone Validate
     console_log = NULL,   # captured cat()/print() output from analysis script
     reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
-    manual      = list(),  # manual escape-hatch sites: list(name,url,token)
     ping_status = list()   # url -> list(ok, checked_at) from the last ping
   )
 
@@ -314,9 +310,6 @@ server <- function(input, output, session) {
             list(name = r$name, url = r$site_addr, token = r$token)
       }
     }
-    for (m in rv$manual)
-      sites[[length(sites) + 1L]] <-
-        list(name = m$name, url = m$url, token = m$token)
     sites
   })
 
@@ -417,15 +410,6 @@ server <- function(input, output, session) {
         tags$td(if (!is.null(r$site_addr)) ping_badge(r$site_addr)),
         tags$td(actions))
     }
-    if (length(rv$manual)) for (i in seq_along(rv$manual)) {
-      m <- rv$manual[[i]]
-      rows[[length(rows) + 1L]] <- tags$tr(
-        tags$td(if (nzchar(m$name)) m$name else "(manual)"),
-        tags$td(m$url),
-        tags$td(span(class = "sbadge sb-muted", "Manual")),
-        tags$td(ping_badge(m$url)),
-        tags$td(act_btn("Remove", "btn-danger", "manual_remove", i)))
-    }
     if (!length(rows))
       return(div(class = "note", "No sites yet. Click “Invite a site”."))
 
@@ -493,38 +477,6 @@ server <- function(input, output, session) {
     reg_modify(REG_FILE, function(reg) reg_revoke_remove(reg, sid))
     rv$reg <- reg_load(REG_FILE)
     showNotification("Site revoked and removed.", type = "message")
-  })
-
-  # ---- Manual add / remove (backward-compat escape hatch) -------
-  observeEvent(input$btn_add_manual, {
-    showModal(modalDialog(
-      title = "Add a site manually",
-      p(class = "note",
-        "For sites configured the old way (shared token), or when you ",
-        "already know a site's address."),
-      textInput("man_name", "Site name (label)", placeholder = "optional"),
-      textInput("man_url", "Site URL", placeholder = "http://100.x.x.x:8000"),
-      passwordInput("man_token", "Token", placeholder = "(leave blank if none)"),
-      footer = tagList(modalButton("Cancel"),
-                       actionButton("man_add", "Add", class = "btn-primary")),
-      easyClose = TRUE))
-  })
-
-  observeEvent(input$man_add, {
-    url <- trimws(input$man_url)
-    if (!nzchar(url)) {
-      showNotification("Enter a site URL.", type = "warning"); return()
-    }
-    rv$manual[[length(rv$manual) + 1L]] <-
-      list(name = trimws(input$man_name), url = url,
-           token = trimws(input$man_token))
-    removeModal()
-  })
-
-  observeEvent(input$manual_remove, {
-    i <- as.integer(input$manual_remove)
-    if (!is.na(i) && i >= 1 && i <= length(rv$manual))
-      rv$manual[[i]] <- NULL
   })
 
   # ---- Ping -----------------------------------------------------
