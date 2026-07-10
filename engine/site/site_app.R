@@ -212,7 +212,7 @@ ui <- fluidPage(
   div(class = "sec-lbl", "Join a study"),
   uiOutput("joined_ui"),
   div(class = "join-box",
-      tags$textarea(id = "invite", placeholder = "Paste your invite here (starts with FEDSTAT2.)"),
+      tags$textarea(id = "invite", placeholder = "Paste your invite or invite link here"),
       div(style = "margin-top:8px;",
           actionButton("btn_join", "Join", class = "btn btn-primary btn-sm")),
       uiOutput("join_status_ui")),
