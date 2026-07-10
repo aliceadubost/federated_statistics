@@ -93,8 +93,8 @@ if !errorlevel! neq 0 (
     echo        https://tailscale.com/download
     echo.
     echo      After installing, sign in and accept the study's network
-    echo      invite (sent to you separately), then close this window
-    echo      and double-click this file again.
+    echo      invite - it was sent to you separately - then close this
+    echo      window and double-click this file again.
     echo.
     start https://tailscale.com/download
     pause
