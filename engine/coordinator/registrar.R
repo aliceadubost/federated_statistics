@@ -26,12 +26,15 @@ suppressPackageStartupMessages({
   library(plumber)
   library(jsonlite)
   library(fedstats)   # fed_verify, fed_bind_host, canonical helpers
+  library(zip)        # builds the self-hosted site kit (see /kit below)
 })
 
 # Sibling registry logic (state machine + persistence + locking).
 .script <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
 .here   <- if (length(.script)) dirname(normalizePath(.script[1])) else getwd()
 source(file.path(.here, "registry.R"))
+
+PROJECT_ROOT <- normalizePath(file.path(.here, "..", ".."))
 
 PORT        <- as.integer(Sys.getenv("FED_REGISTRAR_PORT", "8731"))
 REG_FILE    <- Sys.getenv("FED_REGISTRY_FILE", reg_default_path())
@@ -64,6 +67,42 @@ pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE))
 pr$handle("GET", "/ping", function(req, res) {
   list(status = "ok", service = "registrar", port = PORT)
 })
+
+# ---- self-hosted site kit ---------------------------------------
+# A brand-new site operator needs the software before they can do anything
+# else, and previously the only way to get it was "clone/download from my
+# GitHub" — which only works for whoever happens to own that fork. Since a
+# site operator must already be on this coordinator's tailnet before they'd
+# ever reach this registrar at all (same reasoning as the /i/<sid> short
+# link above), the registrar can just serve the install package itself:
+# works identically for any coordinator, no GitHub involved.
+#
+# Only what a site actually needs — never engine/coordinator/, analysis/
+# templates, or the design/testing docs.
+KIT_FILES <- c(
+  "Run/Windows/Start Site.bat", "Run/Mac/Start Site.command", "Run/Linux/Start Site.sh",
+  "engine/site/site_app.R", "engine/site/api_server.R", "engine/setup.R",
+  file.path("fedstats", list.files(file.path(PROJECT_ROOT, "fedstats"), recursive = TRUE))
+)
+.kit_zip_path <- NULL  # built lazily on first request, then reused
+
+build_kit_zip <- function() {
+  path <- file.path(tempdir(), "federated-statistics-site-kit.zip")
+  zip::zip(zipfile = path, files = KIT_FILES, root = PROJECT_ROOT)
+  path
+}
+
+pr$handle("GET", "/kit", function(req, res) {
+  ip <- if (!is.null(req$REMOTE_ADDR)) req$REMOTE_ADDR else "unknown"
+  if (!rate_ok(ip)) {
+    res$status <- 429
+    return(list(error = "Too many requests. Try again shortly."))
+  }
+  if (is.null(.kit_zip_path) || !file.exists(.kit_zip_path))
+    .kit_zip_path <<- build_kit_zip()
+  bytes <- readBin(.kit_zip_path, "raw", file.info(.kit_zip_path)$size)
+  as_attachment(bytes, "federated-statistics-site-kit.zip")
+}, serializer = plumber::serializer_content_type("application/zip"))
 
 # ---- short invite link -------------------------------------------
 # Resolves /i/<sid> to the full invite text, so an operator only has to
