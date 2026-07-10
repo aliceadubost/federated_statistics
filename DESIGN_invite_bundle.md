@@ -292,6 +292,12 @@ wire protocol need **no change at all**.
 
 ### Backward compatibility (a pre-Phase-2 site must keep working)
 
+> **Later removed:** this backward-compat path (the site's manual Token field
+> and the coordinator's "Add site manually") was removed on `alice/phase3-polish`
+> after live multi-machine testing confirmed the invite flow alone works
+> end-to-end — the app is invite-only now. Kept below as the historical
+> rationale for why it was designed this way originally.
+
 The crucial enabler: **`api_server.R` is mode-agnostic.** It just compares
 whatever token it was given (`check_token()` is unchanged from Phase 1). A
 per-site token and the old shared token are indistinguishable to the server — it

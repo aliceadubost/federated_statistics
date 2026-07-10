@@ -212,6 +212,14 @@ Steps, in order, no pausing to read:
 
 ## 7. Onboard the rest — mixed new + legacy session (REQUIRED)
 
+> **Later removed:** after live multi-machine testing on `alice/phase3-polish`
+> confirmed the invite flow works end-to-end, the legacy shared-token path
+> (§7.2 below, the site's Token field, and the coordinator's **Add manually**
+> button) was removed entirely in favour of invite-only onboarding. §7.2, the
+> `Manual` badge, and the legacy references in Section 12 are kept below as a
+> historical record of what Phase 2 originally supported — they no longer
+> apply to the current app. §7.1 (the invite flow) is unaffected.
+
 Bring all four sites online in one coordinator session: three via invites, one
 the **old way**. The coordinator must handle the mix.
 

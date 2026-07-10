@@ -41,16 +41,12 @@ The first launch installs everything else automatically.
 
 That's it. You can stop the server at any time by clicking **Stop Server**.
 
-> **Already set up the old way** (a shared token, no invite)? That still works:
-> leave the invite box empty, type your token in the **Token** field, and click
-> **Start Server**. The coordinator adds you with **Add manually**.
-
 ### If you are the coordinator (researcher)
 
 1. Double-click **Start Coordinator** in the same `Run/` folder
 2. A browser window opens — it starts a small registration listener on **port 8731** (Tailscale interface only) so sites can register back to you
 3. Click **Browse** and select an analysis script
-4. For each site, click **Invite a site**, copy the invite, and send it to that site operator. Registered sites appear in the list automatically. (Use **Add manually** for a site you already have a URL and token for.)
+4. For each site, click **Invite a site**, copy the invite, and send it to that site operator. Registered sites appear in the list automatically.
 5. Click **Ping → Validate → Run Analysis**
 6. Results appear as tabs: tables, plots, and a console with key numbers
 
