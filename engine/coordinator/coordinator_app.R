@@ -235,32 +235,17 @@ invite_expiry_label <- function(exp, invite_state, now = as.integer(Sys.time()))
   else sprintf("expires in %dh", max(1L, secs_left %/% 3600L))
 }
 
-# Pure function (no Shiny dependency): given which of the three pipeline
-# stages are complete, returns "done" / "active" / "pending" for each —
-# "active" is the first not-yet-done stage, matching a standard wizard
-# stepper (only one step is ever the current focus).
-pipeline_step_states <- function(done) {
-  first_pending <- which(!done)[1]
-  vapply(seq_along(done), function(i) {
-    if (isTRUE(done[i])) "done"
-    else if (!is.na(first_pending) && i == first_pending) "active"
-    else "pending"
-  }, character(1))
-}
-
-# Top-of-main-panel progress stepper reflecting real pipeline state (not
-# static instructions — the sidebar's own step labels already cover that).
-build_stepper <- function(step_script, n_sites, step_results) {
-  states <- pipeline_step_states(c(step_script, n_sites > 0, step_results))
-  labels <- c("Script", if (n_sites > 0) sprintf("Sites (%d)", n_sites) else "Sites", "Results")
-  items  <- lapply(seq_along(states), function(i)
-    tagList(
-      if (i > 1) div(class = "step-line"),
-      div(class = paste("step-item", paste0("step-", states[i])),
-          div(class = "step-num", if (states[i] == "done") "✓" else i),
-          div(class = "step-label", labels[i]))
-    ))
-  div(class = "stepper", items)
+# Pure function (no Shiny dependency): a plain-language readiness line
+# shown only in the "setup" phase (see #workspace phase toggle in server())
+# — replaces the earlier numbered-stepper widget, which implied a required
+# Script-then-Sites order that was never actually enforced.
+build_readiness_note <- function(step_script, n_sites) {
+  missing <- c(
+    if (!step_script) "load an analysis script",
+    if (n_sites == 0) "invite at least one site"
+  )
+  if (length(missing) == 0) return("Ready — click Validate or Run when you are.")
+  sprintf("To get started: %s.", paste(missing, collapse = " and "))
 }
 
 # ---------------------------------------------------------------
@@ -350,20 +335,14 @@ ui <- fluidPage(
                font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
                font-size:0.82rem; word-break:break-all; border-radius:10px; border-color:var(--line);
                padding:12px; }
-    /* ── Pipeline stepper (top of main panel) ─────────────────────── */
-    .stepper { display:flex; align-items:flex-start; margin-bottom:30px; }
-    .step-item { display:flex; flex-direction:column; align-items:center; gap:7px; }
-    .step-num { width:34px; height:34px; border-radius:50%; display:flex;
-                align-items:center; justify-content:center; font-weight:700;
-                font-size:.92rem; background:var(--muted-bg); color:var(--muted-fg);
-                border:2px solid var(--line); transition:all .2s ease; }
-    .step-label { font-size:.82rem; color:var(--ink-muted); font-weight:600; white-space:nowrap; }
-    .step-line  { flex:1; height:2px; background:var(--line); margin:17px 10px 0; }
-    .step-active .step-num   { background:var(--brand); color:#fff; border-color:var(--brand);
-                                box-shadow:0 0 0 5px var(--tint); }
-    .step-active .step-label { color:var(--brand-deep); }
-    .step-done .step-num     { background:var(--ok-bg); color:var(--ok-fg); border-color:#86EFAC; }
-    .step-done .step-label   { color:var(--ok-fg); }
+    /* ── Two-phase workspace: big centered setup, then compact + results ─
+       Same DOM/inputs the whole time (nothing is ever destroyed/recreated
+       on transition — only #workspace's class changes, server-side, once
+       Validate/Run actually produce something). phase-results needs no
+       rules: Bootstrap's own col-sm-5/col-sm-7 (from sidebarPanel(width=5)/
+       mainPanel(width=7)) are already exactly that look. ─────────────── */
+    #workspace.phase-setup .col-sm-5 { float:none; width:100%; max-width:760px; margin:0 auto; }
+    #workspace.phase-setup .col-sm-7 { display:none; }
     /* ── Result tabs: modern underline style ──────────────────────── */
     .nav-tabs { border-bottom:2px solid var(--line); }
     .nav-tabs > li > a { border:none !important; background:transparent !important;
@@ -383,11 +362,15 @@ ui <- fluidPage(
       el.select(); el.setSelectionRange(0, 99999);
       navigator.clipboard.writeText(el.value);
     }
+    Shiny.addCustomMessageHandler('setPhase', function(phase){
+      var el = document.getElementById('workspace');
+      if (el) el.className = 'phase-' + phase;
+    });
   ")),
 
   uiOutput("app_title_ui"),
 
-  sidebarLayout(
+  div(id = "workspace", class = "phase-setup", sidebarLayout(
     sidebarPanel(
       width = 5,
 
@@ -416,6 +399,7 @@ ui <- fluidPage(
       uiOutput("sites_table_ui"),
 
       hr(),
+      uiOutput("readiness_note"),
 
       actionButton("btn_ping",     "Ping sites",
                    class = "btn-default btn-block"),
@@ -438,7 +422,7 @@ ui <- fluidPage(
       width = 7,
       uiOutput("results_panel")
     )
-  )
+  ))
 )
 
 # ---------------------------------------------------------------
@@ -453,8 +437,21 @@ server <- function(input, output, session) {
     console_log = NULL,   # captured cat()/print() output from analysis script
     reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
     ping_status = list(),  # url -> list(ok, checked_at) from the last ping
-    pending_revoke_sid = NULL  # sid awaiting confirm in the Revoke dialog
+    pending_revoke_sid = NULL, # sid awaiting confirm in the Revoke dialog
+    phase       = "setup" # "setup" (big, centered) -> "results" (compact),
+                          # one-way for the rest of the session
   )
+
+  # ---- Phase transition: big centered setup -> compact + results, the
+  # first time Validate/Run actually produce something. One-way — loading
+  # a different script later clears rv$outputs/val_txt but must not dump
+  # the operator back into the setup screen; they're already working.
+  observe({
+    if (identical(rv$phase, "setup") && (!is.null(rv$val_txt) || !is.null(rv$outputs))) {
+      rv$phase <- "results"
+      session$sendCustomMessage("setPhase", "results")
+    }
+  })
 
   # ---- Poll the registry file + drain registrar logs ------------
   poll <- reactiveTimer(1500)
@@ -854,16 +851,20 @@ server <- function(input, output, session) {
   })
 
   # ---- Main panel -----------------------------------------------
+  # Readiness note (setup phase only — see the phase-transition observe()
+  # above). Once in "results" phase this whole sidebar area has already
+  # done its job, so it's hidden rather than left showing a stale "Ready".
+  output$readiness_note <- renderUI({
+    if (!identical(rv$phase, "setup")) return(NULL)
+    div(class = "note", style = "margin-top:8px;",
+       build_readiness_note(!is.null(rv$meta), length(active_sites())))
+  })
+
   output$results_panel <- renderUI({
-
-    stepper <- build_stepper(!is.null(rv$meta), length(active_sites()), !is.null(rv$outputs))
-
-    # No script loaded yet — the sidebar's own numbered steps already say
-    # what to do; this just needs to say results aren't here yet.
-    if (is.null(rv$meta)) {
-      return(tagList(stepper, div(class = "welcome",
-        p("Results will appear here once you load an analysis script."))))
-    }
+    # mainPanel is hidden (display:none) until rv$phase == "results", which
+    # itself requires rv$meta to already be set (Validate/Run both check
+    # that first) — so by the time this is ever visible, a script is
+    # guaranteed loaded. No "no script yet" branch needed.
 
     # Build tab list: always include Status tab, add output tabs if available
     all_tabs <- list()
@@ -910,7 +911,7 @@ server <- function(input, output, session) {
       )
     }
 
-    tagList(stepper, do.call(tabsetPanel, c(list(id = "dyn_tabs"), all_tabs)))
+    do.call(tabsetPanel, c(list(id = "dyn_tabs"), all_tabs))
   })
 
   # val_display is always registered; shown inside the Status tab
