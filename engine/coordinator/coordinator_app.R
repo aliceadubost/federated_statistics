@@ -168,6 +168,34 @@ ping_badge_state <- function(st, now = Sys.time()) {
   if (age < PING_STALE_S) "connected" else "stale"
 }
 
+# Pure function (no Shiny dependency): given which of the three pipeline
+# stages are complete, returns "done" / "active" / "pending" for each —
+# "active" is the first not-yet-done stage, matching a standard wizard
+# stepper (only one step is ever the current focus).
+pipeline_step_states <- function(done) {
+  first_pending <- which(!done)[1]
+  vapply(seq_along(done), function(i) {
+    if (isTRUE(done[i])) "done"
+    else if (!is.na(first_pending) && i == first_pending) "active"
+    else "pending"
+  }, character(1))
+}
+
+# Top-of-main-panel progress stepper reflecting real pipeline state (not
+# static instructions — the sidebar's own step labels already cover that).
+build_stepper <- function(step_script, n_sites, step_results) {
+  states <- pipeline_step_states(c(step_script, n_sites > 0, step_results))
+  labels <- c("Script", if (n_sites > 0) sprintf("Sites (%d)", n_sites) else "Sites", "Results")
+  items  <- lapply(seq_along(states), function(i)
+    tagList(
+      if (i > 1) div(class = "step-line"),
+      div(class = paste("step-item", paste0("step-", states[i])),
+          div(class = "step-num", if (states[i] == "done") "✓" else i),
+          div(class = "step-label", labels[i]))
+    ))
+  div(class = "stepper", items)
+}
+
 # ---------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------
@@ -255,6 +283,30 @@ ui <- fluidPage(
                font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
                font-size:0.82rem; word-break:break-all; border-radius:10px; border-color:var(--line);
                padding:12px; }
+    /* ── Pipeline stepper (top of main panel) ─────────────────────── */
+    .stepper { display:flex; align-items:flex-start; margin-bottom:30px; }
+    .step-item { display:flex; flex-direction:column; align-items:center; gap:7px; }
+    .step-num { width:34px; height:34px; border-radius:50%; display:flex;
+                align-items:center; justify-content:center; font-weight:700;
+                font-size:.92rem; background:var(--muted-bg); color:var(--muted-fg);
+                border:2px solid var(--line); transition:all .2s ease; }
+    .step-label { font-size:.82rem; color:var(--ink-muted); font-weight:600; white-space:nowrap; }
+    .step-line  { flex:1; height:2px; background:var(--line); margin:17px 10px 0; }
+    .step-active .step-num   { background:var(--brand); color:#fff; border-color:var(--brand);
+                                box-shadow:0 0 0 5px var(--tint); }
+    .step-active .step-label { color:var(--brand-deep); }
+    .step-done .step-num     { background:var(--ok-bg); color:var(--ok-fg); border-color:#86EFAC; }
+    .step-done .step-label   { color:var(--ok-fg); }
+    /* ── Result tabs: modern underline style ──────────────────────── */
+    .nav-tabs { border-bottom:2px solid var(--line); }
+    .nav-tabs > li > a { border:none !important; background:transparent !important;
+                         color:var(--ink-muted); font-weight:600; font-size:.92rem;
+                         padding:11px 20px; border-radius:8px 8px 0 0; margin-right:2px; }
+    .nav-tabs > li > a:hover { color:var(--brand-dark); background:var(--tint) !important; }
+    .nav-tabs > li.active > a,
+    .nav-tabs > li.active > a:hover,
+    .nav-tabs > li.active > a:focus { color:var(--brand); background:transparent !important;
+                                      border:none !important; box-shadow:inset 0 -3px 0 var(--brand); }
   "))),
 
   tags$script(HTML("
@@ -635,11 +687,13 @@ server <- function(input, output, session) {
   # ---- Main panel -----------------------------------------------
   output$results_panel <- renderUI({
 
+    stepper <- build_stepper(!is.null(rv$meta), length(active_sites()), !is.null(rv$outputs))
+
     # No script loaded yet — the sidebar's own numbered steps already say
     # what to do; this just needs to say results aren't here yet.
     if (is.null(rv$meta)) {
-      return(div(class = "welcome",
-        p("Results will appear here once you load an analysis script.")))
+      return(tagList(stepper, div(class = "welcome",
+        p("Results will appear here once you load an analysis script."))))
     }
 
     # Build tab list: always include Status tab, add output tabs if available
@@ -687,7 +741,7 @@ server <- function(input, output, session) {
       )
     }
 
-    do.call(tabsetPanel, c(list(id = "dyn_tabs"), all_tabs))
+    tagList(stepper, do.call(tabsetPanel, c(list(id = "dyn_tabs"), all_tabs)))
   })
 
   # val_display is always registered; shown inside the Status tab
