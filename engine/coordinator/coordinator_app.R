@@ -205,8 +205,9 @@ ui <- fluidPage(
            max-height: 480px; overflow-y: auto; }
     .tbl-caption { font-size: 0.9rem; color: var(--ink-muted); font-style: italic;
                    margin: 6px 0 16px 0; }
-    .welcome { color: var(--ink-muted); padding: 60px 20px; text-align: center; }
-    .welcome h3 { color: var(--ink); border:none; }
+    .welcome { color: var(--ink-muted); padding: 40px 20px; text-align: center;
+               font-size: .95rem; }
+    .welcome h3, .welcome h4 { color: var(--ink); border:none; }
     .note { font-size: 0.85rem; color: var(--ink-muted); margin-top: 12px; line-height:1.5; }
     .btn, button.btn { border-radius:9px; font-weight:600; transition:all .15s ease; }
     .btn-primary,
@@ -223,12 +224,20 @@ ui <- fluidPage(
     .btn-success:hover { background-color:#15803D !important; transform:translateY(-1px); }
     label { font-weight:600; font-size:.92rem; color:var(--ink-muted); }
     /* ── Sites table ───────────────────────────────────────────── */
-    .sites-tbl { width:100%; font-size:0.92rem; border-collapse:collapse; }
+    .sites-tbl { width:100%; font-size:0.92rem; border-collapse:collapse; table-layout:fixed; }
     .sites-tbl th { text-align:left; color:var(--ink-muted); font-size:0.82rem;
                     text-transform:uppercase; letter-spacing:.04em;
                     border-bottom:2px solid var(--line); padding:8px 6px; }
     .sites-tbl td { padding:9px 6px; border-bottom:1px solid var(--line);
-                    vertical-align:middle; word-break:break-all; }
+                    vertical-align:middle; overflow-wrap:anywhere; }
+    .site-name    { font-weight:700; white-space:nowrap; }
+    .site-addr-sub { font-size:.72rem; color:var(--ink-muted); margin-top:2px;
+                     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+                     overflow-wrap:anywhere; }
+    .sites-tbl th:nth-child(1), .sites-tbl td:nth-child(1) { width:44%; }
+    .sites-tbl th:nth-child(2), .sites-tbl td:nth-child(2) { width:19%; }
+    .sites-tbl th:nth-child(3), .sites-tbl td:nth-child(3) { width:22%; }
+    .sites-tbl th:nth-child(4), .sites-tbl td:nth-child(4) { width:15%; }
     .sbadge { display:inline-block; padding:3px 12px; border-radius:20px;
               font-size:0.78rem; font-weight:700; }
     .sb-ok    { background:var(--ok-bg);    color:var(--ok-fg); }
@@ -261,7 +270,7 @@ ui <- fluidPage(
 
   sidebarLayout(
     sidebarPanel(
-      width = 4,
+      width = 5,
 
       # ---- Step 1: analysis script ----
       div(class = "step", "① Analysis script"),
@@ -296,7 +305,7 @@ ui <- fluidPage(
     ),
 
     mainPanel(
-      width = 8,
+      width = 7,
       uiOutput("results_panel")
     )
   )
@@ -433,9 +442,14 @@ server <- function(input, output, session) {
         if (!is.null(r$pending))
           act_btn("Approve", "btn-success", "approve_sid", sid),
         act_btn("Revoke", "btn-danger", "revoke_sid", sid))
+      # Name + address stacked in one cell (address as a small subtitle line)
+      # instead of side-by-side columns — a full "http://100.x.x.x:8000" URL
+      # otherwise squeezes the Name column so tight that even short names
+      # wrap mid-word.
       rows[[length(rows) + 1L]] <- tags$tr(
-        tags$td(if (nzchar(r$name)) r$name else "(unnamed)"),
-        tags$td(if (!is.null(r$site_addr)) r$site_addr else "—"),
+        tags$td(
+          div(class = "site-name", if (nzchar(r$name)) r$name else "(unnamed)"),
+          if (!is.null(r$site_addr)) div(class = "site-addr-sub", r$site_addr)),
         tags$td(badge(r$invite_state, r$pending)),
         tags$td(if (!is.null(r$site_addr)) ping_badge(r$site_addr)),
         tags$td(actions))
@@ -444,7 +458,7 @@ server <- function(input, output, session) {
       return(div(class = "note", "No sites yet. Click “Invite a site”."))
 
     tags$table(class = "sites-tbl",
-      tags$thead(tags$tr(tags$th("Name"), tags$th("Address"),
+      tags$thead(tags$tr(tags$th("Site"),
                          tags$th("Status"), tags$th("Reachability"), tags$th(""))),
       tags$tbody(rows))
   })
@@ -621,15 +635,11 @@ server <- function(input, output, session) {
   # ---- Main panel -----------------------------------------------
   output$results_panel <- renderUI({
 
-    # No script loaded: welcome screen
+    # No script loaded yet — the sidebar's own numbered steps already say
+    # what to do; this just needs to say results aren't here yet.
     if (is.null(rv$meta)) {
       return(div(class = "welcome",
-        h3("Federated Analysis Coordinator"),
-        br(),
-        p("① Load an analysis script  (.R file that follows the contract)"),
-        p("② Invite your sites (or add one manually)"),
-        p("③ Ping → Validate → Run Analysis")
-      ))
+        p("Results will appear here once you load an analysis script.")))
     }
 
     # Build tab list: always include Status tab, add output tabs if available
