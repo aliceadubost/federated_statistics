@@ -104,6 +104,36 @@ pr$handle("GET", "/kit", function(req, res) {
   as_attachment(bytes, "federated-statistics-site-kit.zip")
 }, serializer = plumber::serializer_content_type("application/zip"))
 
+# A silent, no-page direct download (the /kit route above) is unreliable
+# across browsers — some block it outright, none give clear confirmation
+# it worked. /get is what the coordinator actually shares: a real page
+# that proves the operator is on the right network (if it loads at all,
+# connectivity works) with a visible, genuinely clickable download button.
+KIT_PAGE_HTML <- paste0(
+  '<!doctype html><html><head><meta charset="utf-8">',
+  '<meta name="viewport" content="width=device-width, initial-scale=1">',
+  '<title>Federated Statistics — Site Kit</title><style>',
+  'body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;',
+  'background:#F8FAFC;color:#0F172A;max-width:480px;margin:80px auto;padding:32px;text-align:center;}',
+  'h1{font-size:1.5rem;margin-bottom:8px;}',
+  'p{color:#475569;line-height:1.6;}',
+  '.btn{display:inline-block;margin-top:20px;padding:14px 32px;background:#2563EB;color:#fff;',
+  'text-decoration:none;border-radius:9px;font-weight:600;font-size:1.05rem;',
+  'box-shadow:0 2px 8px rgba(37,99,235,.25);}',
+  '.btn:hover{background:#1D4ED8;}',
+  '.note{margin-top:24px;font-size:.85rem;color:#94A3B8;}',
+  '</style></head><body>',
+  '<h1>Federated Statistics — Site Kit</h1>',
+  '<p>You are connected. Click below to download everything you need to run a site.</p>',
+  '<a class="btn" href="/kit">Download Site Kit</a>',
+  '<p class="note">Unzip it, then open the “Start Site” file for your computer.</p>',
+  '</body></html>'
+)
+
+pr$handle("GET", "/get", function(req, res) {
+  KIT_PAGE_HTML
+}, serializer = plumber::serializer_content_type("text/html"))
+
 # ---- short invite link -------------------------------------------
 # Resolves /i/<sid> to the full invite text, so an operator only has to
 # be sent (and paste) a short URL instead of the ~450-char invite blob.

@@ -139,10 +139,10 @@ build_onboarding_message <- function(study, kit_link, invite_link) {
     "then accept it and sign in.",
     "",
     "STEP 2 - Get the study software (one-time)",
-    "Once Tailscale is connected, open this link and save the file:",
+    "Once Tailscale is connected, open this link and click the download button:",
     kit_link,
-    "Unzip it anywhere, then open the \"Start Site\" file for your computer",
-    "(inside the Run folder).",
+    "Unzip the downloaded file anywhere, then open the \"Start Site\" file for",
+    "your computer (inside the Run folder).",
     "",
     "STEP 3 - Join the study",
     "Paste this into the app and click Join:",
@@ -577,7 +577,9 @@ server <- function(input, output, session) {
     rv$reg <- reg_load(REG_FILE)
 
     short_link <- if (nzchar(COORD_ADDR)) sprintf("http://%s/i/%s", COORD_ADDR, sid) else ""
-    kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/kit", COORD_ADDR) else ""
+    # /get (a real page with a visible download button), not /kit directly —
+    # a silent no-page download is unreliable/invisible across browsers.
+    kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/get", COORD_ADDR) else ""
     onboarding_msg <- if (nzchar(short_link) && nzchar(kit_link))
       build_onboarding_message(study, kit_link, short_link) else ""
 
