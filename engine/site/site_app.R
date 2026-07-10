@@ -40,7 +40,6 @@ if (!dir.exists(.data_dir))
   if (length(found)) return(found)
   list.files(.app_root, pattern = "\\.csv$", full.names = TRUE, recursive = FALSE)
 }
-.csv_files <- .scan_csvs()
 
 # ---- Tailscale IP ---------------------------------------------------
 # A function, not a one-shot constant: if Tailscale connects *after* this
@@ -239,6 +238,9 @@ ui <- fluidPage(
 # Server
 # -----------------------------------------------------------------------
 server <- function(input, output, session) {
+
+  # Reactive so Refresh can re-scan data/ without restarting the app.
+  csv_files_rv <- reactiveVal(.scan_csvs())
 
   rv <- reactiveValues(
     proc         = NULL,
@@ -460,23 +462,32 @@ server <- function(input, output, session) {
     }
   })
 
-  # ---- File selector (auto-detect or manual browse) --------------
+  # ---- File selector: the data/ folder dropdown and Browse are always
+  # both available (not either/or) — picking a CSV from elsewhere isn't an
+  # error case, it's just as normal a path as the quick-access folder.
+  # Refresh re-scans data/ without restarting the app, e.g. after dropping
+  # in a file for a different study you want to try next.
+  observeEvent(input$btn_refresh_files, {
+    csv_files_rv(.scan_csvs())
+  })
+
   output$file_ui <- renderUI({
-    if (length(.csv_files) > 0) {
-      selectInput("data_file", "Data file",
-                  choices = setNames(.csv_files, basename(.csv_files)))
-    } else {
-      tagList(
-        div(style = "color:#c53030; font-size:.83em; margin-bottom:4px;",
-            sprintf(
-              "No CSV found. Put your file in this folder, then restart Start Site: %s",
-              .data_dir
-            )),
-        fileInput("data_file_upload", "Data file (.csv)",
-                  accept = ".csv", buttonLabel = "Browse…",
-                  placeholder = "No file selected")
-      )
-    }
+    files <- csv_files_rv()
+    tagList(
+      div(style = "display:flex; justify-content:space-between; align-items:baseline;",
+          tags$span("Data file", style = "font-weight:600; font-size:.92rem; color:var(--ink-muted);"),
+          actionLink("btn_refresh_files", "↻ Refresh", style = "font-size:.82rem;")),
+      if (length(files) > 0) {
+        selectInput("data_file", NULL, choices = setNames(files, basename(files)))
+      } else {
+        div(class = "note", style = "margin-top:2px; margin-bottom:8px;",
+            sprintf("Nothing in %s yet — that's fine, just browse below.", .data_dir))
+      },
+      div(style = "margin-top:6px;",
+          fileInput("data_file_upload", "Or choose a file from anywhere",
+                    accept = ".csv", buttonLabel = "Browse…",
+                    placeholder = "No file selected"))
+    )
   })
 
   # ---- Start / Stop button ---------------------------------------
@@ -503,15 +514,18 @@ server <- function(input, output, session) {
                        type = "warning"); return()
     }
 
-    data_path <- if (length(.csv_files) > 0) {
+    # Browse takes priority when used (an explicit override); otherwise
+    # fall back to whatever's picked from the data/ folder dropdown.
+    data_path <- if (!is.null(input$data_file_upload)) {
+      input$data_file_upload$datapath
+    } else if (!is.null(input$data_file) && nzchar(input$data_file)) {
       input$data_file
     } else {
-      req(input$data_file_upload)
-      input$data_file_upload$datapath
+      NA_character_
     }
 
-    if (is.null(data_path) || !nzchar(data_path) || !file.exists(data_path)) {
-      showNotification("Data file not found",
+    if (is.na(data_path) || !nzchar(data_path) || !file.exists(data_path)) {
+      showNotification("Select a data file first.",
                        type = "error"); return()
     }
 
