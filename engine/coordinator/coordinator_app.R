@@ -220,6 +220,21 @@ ping_badge_state <- function(st, now = Sys.time()) {
   if (age < PING_STALE_S) "connected" else "stale"
 }
 
+# Pure function (no Shiny dependency): a countdown label for an invite
+# that hasn't been consumed yet, or NULL when there's nothing useful to
+# show (already registered — the expiry only ever governed the invite
+# window, not the site itself; already expired — its own badge already
+# says so; or no exp value at all).
+invite_expiry_label <- function(exp, invite_state, now = as.integer(Sys.time())) {
+  if (!isTRUE(invite_state %in% c("issued", "in_use"))) return(NULL)
+  if (is.null(exp) || is.na(exp)) return(NULL)
+  secs_left <- exp - now
+  if (secs_left <= 0) return(NULL)
+  days_left <- secs_left %/% 86400L
+  if (days_left >= 1L) sprintf("expires in %dd", days_left)
+  else sprintf("expires in %dh", max(1L, secs_left %/% 3600L))
+}
+
 # Pure function (no Shiny dependency): given which of the three pipeline
 # stages are complete, returns "done" / "active" / "pending" for each —
 # "active" is the first not-yet-done stage, matching a standard wizard
@@ -381,12 +396,16 @@ ui <- fluidPage(
       div(class = "step", "Study"),
       textInput("study_name", NULL, value = "Federated study", width = "100%"),
 
+      hr(),
+
       # ---- Analysis script (no required order relative to Sites below —
       # invite people whenever, load/swap scripts whenever) ----
       div(class = "step", "Analysis script"),
       fileInput("script_file", NULL, accept = ".R",
                 buttonLabel = "Browse…", placeholder = "No script selected"),
       uiOutput("script_meta_ui"),
+
+      hr(),
 
       # ---- Sites ----
       div(class = "step", "Sites"),
@@ -396,7 +415,8 @@ ui <- fluidPage(
                        class = "btn-primary btn-sm")),
       uiOutput("sites_table_ui"),
 
-      br(),
+      hr(),
+
       actionButton("btn_ping",     "Ping sites",
                    class = "btn-default btn-block"),
       br(),
@@ -432,7 +452,8 @@ server <- function(input, output, session) {
     val_txt     = NULL,   # text from standalone Validate
     console_log = NULL,   # captured cat()/print() output from analysis script
     reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
-    ping_status = list()   # url -> list(ok, checked_at) from the last ping
+    ping_status = list(),  # url -> list(ok, checked_at) from the last ping
+    pending_revoke_sid = NULL  # sid awaiting confirm in the Revoke dialog
   )
 
   # ---- Poll the registry file + drain registrar logs ------------
@@ -560,7 +581,9 @@ server <- function(input, output, session) {
         tags$td(
           div(class = "site-name", if (nzchar(r$name)) r$name else "(unnamed)"),
           if (!is.null(r$site_addr)) div(class = "site-addr-sub", r$site_addr)),
-        tags$td(badge(r$invite_state, r$pending)),
+        tags$td(badge(r$invite_state, r$pending),
+               { lbl <- invite_expiry_label(r$exp, r$invite_state)
+                 if (!is.null(lbl)) div(class = "site-addr-sub", lbl) }),
         tags$td(if (!is.null(r$site_addr)) ping_badge(r$site_addr)),
         tags$td(actions))
     }
@@ -695,11 +718,29 @@ server <- function(input, output, session) {
     showNotification("Registration approved.", type = "message")
   })
 
-  # ---- Revoke and Remove ----------------------------------------
+  # ---- Revoke and Remove (confirm first — not reversible: the token goes
+  # on the permanent revocation list and the row disappears) --------
   observeEvent(input$revoke_sid, {
     sid <- input$revoke_sid
+    r   <- rv$reg$sites[[sid]]
+    label <- if (!is.null(r) && nzchar(r$name)) r$name else "(unnamed)"
+    showModal(modalDialog(
+      title = "Revoke this site?",
+      p("This removes ", strong(label), " and permanently revokes its token. ",
+        "This can't be undone — if they need to rejoin, you'll have to send a new invite."),
+      footer = tagList(modalButton("Cancel"),
+                       actionButton("revoke_confirm", "Revoke", class = "btn-danger")),
+      easyClose = TRUE))
+    rv$pending_revoke_sid <- sid
+  })
+
+  observeEvent(input$revoke_confirm, {
+    sid <- rv$pending_revoke_sid
+    removeModal()
+    if (is.null(sid)) return()
     reg_modify(REG_FILE, function(reg) reg_revoke_remove(reg, sid))
     rv$reg <- reg_load(REG_FILE)
+    rv$pending_revoke_sid <- NULL
     showNotification("Site revoked and removed.", type = "message")
   })
 
