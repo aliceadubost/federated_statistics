@@ -80,6 +80,27 @@ echo.
 
 :: ── Step 3 of 3: Tailscale ───────────────────────────────────
 echo [ Step 3 of 3 ]  Checking Tailscale (secure network connection)...
+
+where tailscale >nul 2>&1
+if !errorlevel! neq 0 (
+    echo.
+    echo   X  Tailscale is not installed on this computer.
+    echo.
+    echo      Tailscale is what lets your computer connect securely to
+    echo      the study coordinator - it's required before you can join.
+    echo.
+    echo      Please download and install it from:
+    echo        https://tailscale.com/download
+    echo.
+    echo      After installing, sign in and accept the study's network
+    echo      invite (sent to you separately), then close this window
+    echo      and double-click this file again.
+    echo.
+    start https://tailscale.com/download
+    pause
+    exit /b 1
+)
+
 set "TAILSCALE_IP="
 for /f "tokens=* usebackq" %%I in (`tailscale ip -4 2^>nul`) do (
     set "TAILSCALE_IP=%%I" & goto :ts_done
@@ -91,9 +112,9 @@ if not "!TAILSCALE_IP!"=="" (
     echo       Your address will be shown in the browser interface.
 ) else (
     echo.
-    echo   ^!  Tailscale is not running or not connected.
-    echo       Open the Tailscale app and connect for remote analysis.
-    echo       Download Tailscale:  https://tailscale.com/download
+    echo   ^!  Tailscale is installed but not connected.
+    echo       Open the Tailscale app, sign in, and make sure you've
+    echo       accepted the study's network invite.
     echo.
     set /p "CONT=   Press Enter to continue anyway..."
 )

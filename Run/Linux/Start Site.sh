@@ -87,19 +87,35 @@ echo ""
 # ── Step 3 of 3: Tailscale ──────────────────────────────────
 echo "[ Step 3 of 3 ]  Checking Tailscale (secure network connection)..."
 
-TAILSCALE_IP=""
-if command -v tailscale &>/dev/null; then
-  TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -1)
+if ! command -v tailscale &>/dev/null; then
+  echo ""
+  echo "  ✗  Tailscale is not installed on this computer."
+  echo ""
+  echo "     Tailscale is what lets your computer connect securely to"
+  echo "     the study coordinator — it's required before you can join."
+  echo ""
+  echo "     Install it:  curl -fsSL https://tailscale.com/install.sh | sh"
+  echo "     Or download: https://tailscale.com/download/linux"
+  echo ""
+  echo "     After installing, run 'sudo tailscale up', sign in, and accept"
+  echo "     the study's network invite (sent to you separately), then"
+  echo "     re-run this script."
+  echo ""
+  read -rp "  Press Enter to close..."
+  exit 1
 fi
+
+TAILSCALE_IP=$(tailscale ip -4 2>/dev/null | head -1)
 
 if [ -n "$TAILSCALE_IP" ]; then
   echo "  ✓  Tailscale connected.  Your IP: $TAILSCALE_IP"
   echo "     Your address will be shown in the browser interface."
 else
   echo ""
-  echo "  ⚠  Tailscale is not running or not connected."
+  echo "  ⚠  Tailscale is installed but not connected."
   echo "     Run:  sudo tailscale up"
-  echo "     Or download Tailscale:  https://tailscale.com/download/linux"
+  echo "     Then sign in and make sure you've accepted the study's"
+  echo "     network invite."
   echo ""
   read -rp "  Press Enter to continue anyway..."
 fi
