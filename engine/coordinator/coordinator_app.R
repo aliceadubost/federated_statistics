@@ -124,6 +124,35 @@ cap_print <- function(expr) {
   paste(buf, collapse = "\n")
 }
 
+# One ready-to-send message for a brand-new site operator with nothing
+# installed yet: Tailscale (the one unavoidable manual step — nothing can
+# reach a machine that isn't on the tailnet yet), the self-hosted kit link,
+# then the study invite. A repeat operator who already has the software
+# just needs the short invite link (shown separately, above this).
+build_onboarding_message <- function(study, kit_link, invite_link) {
+  paste(
+    sprintf('You\'ve been invited to join the "%s" federated study.', study),
+    "",
+    "STEP 1 - Install Tailscale (one-time, about 2 minutes)",
+    "Download: https://tailscale.com/download",
+    "After installing, wait for an invite from me to join our private network,",
+    "then accept it and sign in.",
+    "",
+    "STEP 2 - Get the study software (one-time)",
+    "Once Tailscale is connected, open this link and save the file:",
+    kit_link,
+    "Unzip it anywhere, then open the \"Start Site\" file for your computer",
+    "(inside the Run folder).",
+    "",
+    "STEP 3 - Join the study",
+    "Paste this into the app and click Join:",
+    invite_link,
+    "",
+    "Then pick your data file and click Start Server. That's it.",
+    sep = "\n"
+  )
+}
+
 ping_one <- function(url, token, idx, name = "") {
   label <- if (nzchar(name)) name else paste("Site", idx)
   tryCatch({
@@ -548,6 +577,9 @@ server <- function(input, output, session) {
     rv$reg <- reg_load(REG_FILE)
 
     short_link <- if (nzchar(COORD_ADDR)) sprintf("http://%s/i/%s", COORD_ADDR, sid) else ""
+    kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/kit", COORD_ADDR) else ""
+    onboarding_msg <- if (nzchar(short_link) && nzchar(kit_link))
+      build_onboarding_message(study, kit_link, short_link) else ""
 
     removeModal()
     showModal(modalDialog(
@@ -568,6 +600,20 @@ server <- function(input, output, session) {
       div(style = "margin-top:6px;",
           tags$button("Copy text", class = "btn btn-default btn-sm",
                       onclick = "fedCopy('invite_str')")),
+      if (nzchar(onboarding_msg)) tags$details(
+        style = "margin-top:16px;",
+        tags$summary(style = "cursor:pointer; font-weight:600; color:var(--brand-deep);",
+                     "First time? This operator doesn't have the software yet"),
+        div(style = "margin-top:10px;",
+            p(class = "note", style = "margin-top:0;",
+              "One message covering Tailscale setup, the software, and this invite — ",
+              "send it instead of the invite alone."),
+            tags$textarea(id = "onboard_msg", class = "inv-box", readonly = NA,
+                          style = "height:220px;", onboarding_msg),
+            div(style = "margin-top:6px;",
+                tags$button("Copy onboarding message", class = "btn btn-primary btn-sm",
+                            onclick = "fedCopy('onboard_msg')")))
+      ),
       div(class = "fp", style = "margin-top:10px;",
           "Your key fingerprint (read it to the operator to verify): ",
           tags$b(COORD_FP)),
