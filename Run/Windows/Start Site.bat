@@ -62,7 +62,7 @@ pause
 exit /b 1
 
 :r_found
-for /f "tokens=* usebackq" %%V in (`!RSCRIPT! --version 2^>^&1`) do (
+for /f "tokens=* usebackq" %%V in (`"!RSCRIPT!" --version 2^>^&1`) do (
     echo   OK  %%V & goto :r_ver_done
 )
 :r_ver_done
@@ -70,7 +70,7 @@ echo.
 
 :: ── Step 2 of 3: R packages ──────────────────────────────────
 echo [ Step 2 of 3 ]  Checking required R packages...
-!RSCRIPT! engine\setup.R site
+"!RSCRIPT!" engine\setup.R site
 if !errorlevel! neq 0 (
     echo.
     echo   X  Package setup failed. See errors above.
@@ -110,7 +110,7 @@ echo  ^|    Closing it stops the server.                     ^|
 echo  +------------------------------------------------------+
 echo.
 
-!RSCRIPT! -e "shiny::runApp('engine/site/site_app.R', launch.browser = TRUE)"
+"!RSCRIPT!" -e "shiny::runApp('engine/site/site_app.R', launch.browser = TRUE)"
 
 echo.
 echo   Interface closed.
