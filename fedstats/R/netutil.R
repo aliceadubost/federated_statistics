@@ -128,15 +128,24 @@ fed_friendly_http_error <- function(e = NULL, status_code = NULL) {
 
 #' Decide the interface to bind a server to
 #'
-#' Binds to the Tailscale interface when present; otherwise signals a
-#' fall back to all interfaces. Callers print their own warning so each
-#' server keeps its own wording.
+#' Security-critical: the Tailscale interface is the trust boundary for the
+#' whole system. When Tailscale is present we bind to it. When it is NOT, we
+#' deliberately fall back to loopback (\code{127.0.0.1}) — reachable only
+#' from the same machine — rather than \code{0.0.0.0}, so a
+#' misconfigured/offline-Tailscale site never exposes patient-derived
+#' aggregates to the local network or internet. An operator who genuinely
+#' runs on a different private network can set \code{FED_BIND_HOST} to an
+#' explicit address (informed opt-in); that always wins.
 #'
-#' @return A list: \code{host} (the bind address) and \code{tailscale}
-#'   (logical; FALSE means the 0.0.0.0 fallback is in effect).
+#' @return A list: \code{host} (the bind address), \code{tailscale}
+#'   (logical; FALSE means Tailscale was not detected), and \code{forced}
+#'   (logical; TRUE when \code{FED_BIND_HOST} overrode the choice).
 #' @export
 fed_bind_host <- function() {
+  forced <- Sys.getenv("FED_BIND_HOST", unset = "")
+  if (nzchar(forced))
+    return(list(host = forced, tailscale = nzchar(fed_tailscale_ip()), forced = TRUE))
   ip <- fed_tailscale_ip()
-  if (nzchar(ip)) list(host = ip, tailscale = TRUE)
-  else           list(host = "0.0.0.0", tailscale = FALSE)
+  if (nzchar(ip)) list(host = ip,          tailscale = TRUE,  forced = FALSE)
+  else            list(host = "127.0.0.1", tailscale = FALSE, forced = FALSE)
 }

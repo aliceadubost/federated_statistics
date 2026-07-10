@@ -32,7 +32,11 @@ fed_numeric <- function(servers, varname) {
 #' @param groupvar Character. Grouping variable (any type; converted to character).
 #'
 #' @return A named list keyed by group level. Each entry is a list with
-#'   \code{n}, \code{mean}, \code{sd}, \code{sum}.
+#'   \code{n}, \code{mean}, \code{sd}, \code{sum}, and
+#'   \code{n_sites_suppressed} (how many sites withheld this group because it
+#'   was below their privacy threshold; those sites are excluded from the
+#'   pooled figures). If any cell was suppressed, a \code{warning()} is
+#'   raised naming the affected groups.
 #'
 #' @export
 fed_group_numeric <- function(servers, varname, groupvar) {
@@ -43,17 +47,34 @@ fed_group_numeric <- function(servers, varname, groupvar) {
   # Union of all group levels seen across sites
   all_levels <- sort(unique(unlist(lapply(site_stats, names))))
 
-  # Pool across sites for each level
-  lapply(stats::setNames(all_levels, all_levels), function(lv) {
-    n  <- 0; s <- 0; ss <- 0
+  # Pool across sites for each level, skipping any site that withheld the
+  # group for privacy (a group below the site's min_cell comes back as
+  # {suppressed:true} with no statistics to add).
+  res <- lapply(stats::setNames(all_levels, all_levels), function(lv) {
+    n  <- 0; s <- 0; ss <- 0; n_supp <- 0L
     for (sg in site_stats) {
       g <- sg[[lv]]
-      if (!is.null(g)) { n <- n + g$n; s <- s + g$sum; ss <- ss + g$sumsq }
+      if (is.null(g)) next
+      if (isTRUE(g$suppressed)) { n_supp <- n_supp + 1L; next }
+      n <- n + g$n; s <- s + g$sum; ss <- ss + g$sumsq
     }
     list(n = n, mean = if (n > 0) s / n else NA_real_,
          sd  = if (n > 1) sqrt((ss - s^2 / n) / (n - 1)) else NA_real_,
-         sum = s)
+         sum = s, n_sites_suppressed = n_supp)
   })
+
+  affected <- names(res)[vapply(res, function(e) e$n_sites_suppressed > 0L, logical(1))]
+  if (length(affected) > 0) {
+    total <- sum(vapply(res, function(e) e$n_sites_suppressed, integer(1)))
+    warning(sprintf(
+      paste0("Privacy suppression: %d small subgroup cell(s) hidden for '%s' by '%s' ",
+             "(a site had fewer than its privacy threshold of patients in the group). ",
+             "Affected group(s): %s. Pooled figures for these groups exclude the ",
+             "withheld site(s)."),
+      total, varname, groupvar, paste(affected, collapse = ", ")),
+      call. = FALSE)
+  }
+  res
 }
 
 #' Federated Welch t-test
@@ -80,6 +101,16 @@ fed_welch_t <- function(servers, varname, groupvar, group1, group2) {
     stats <- srv$group_summaries(varname, groupvar)$stats
     a <- stats[[as.character(group1)]]
     b <- stats[[as.character(group2)]]
+    # A requested group withheld for privacy at any site would silently bias
+    # the test if we just skipped it. Refuse instead — never a wrong number.
+    if (isTRUE(a$suppressed) || isTRUE(b$suppressed))
+      stop(sprintf(
+        paste0("Cannot compute the Welch t-test: at one site, group '%s' or '%s' has ",
+               "fewer patients than the privacy threshold, so its statistics are ",
+               "withheld. Returning a result would either expose an individual or ",
+               "silently bias the test. Use larger/merged groups, or drop that site ",
+               "explicitly."),
+        group1, group2), call. = FALSE)
     if (!is.null(a)) { n1 <- n1 + a$n; s1 <- s1 + a$sum; ss1 <- ss1 + a$sumsq }
     if (!is.null(b)) { n2 <- n2 + b$n; s2 <- s2 + b$sum; ss2 <- ss2 + b$sumsq }
   }
@@ -117,6 +148,16 @@ fed_chisq_2x2 <- function(servers, xvar, yvar, correct = TRUE) {
   n00 <- n01 <- n10 <- n11 <- 0
   for (srv in servers) {
     r   <- srv$counts_2x2(xvar, yvar)
+    # If a site withheld its table (a cell below the privacy threshold), the
+    # pooled test cannot be formed without that site. Refuse rather than
+    # compute on an incomplete table.
+    if (isTRUE(r$suppressed))
+      stop(sprintf(
+        paste0("Cannot compute the 2x2 chi-square test: at one site a cell of the ",
+               "%s x %s table is below the privacy threshold, so the whole table is ",
+               "withheld (releasing three cells plus the total would reveal the ",
+               "fourth). Use broader categories, or drop that site explicitly."),
+        xvar, yvar), call. = FALSE)
     n00 <- n00 + r$n00; n01 <- n01 + r$n01
     n10 <- n10 + r$n10; n11 <- n11 + r$n11
   }

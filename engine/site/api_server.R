@@ -35,6 +35,10 @@ DATA_FILE <- get_arg("--data",  "FED_DATA_FILE", NULL)
 PORT      <- as.integer(get_arg("--port",  "FED_PORT",  "8000"))
 TOKEN     <- get_arg("--token", "FED_TOKEN", "")        # "" = no auth
 MIN_N     <- as.integer(get_arg("--min-n", "FED_MIN_N", "20"))
+# Privacy threshold for individual cells (per-group summaries, 2x2 cells,
+# per-variable extremes). Separate from MIN_N (whole-site participation);
+# 5 is the standard medical disclosure-control cell threshold.
+MIN_CELL  <- as.integer(get_arg("--min-cell", "FED_MIN_CELL", "5"))
 
 if (is.null(DATA_FILE) || !nzchar(DATA_FILE)) {
   stop("Provide --data <csv_path> or set FED_DATA_FILE.")
@@ -50,9 +54,9 @@ site_data <- read.csv(
   na.strings = c("", "NA", "NaN", "NULL")
 )
 
-srv <- create_server(site_data, min_n = MIN_N)
-cat(sprintf("[api_server] Loaded %d rows. Listening on port %d.\n",
-            nrow(site_data), PORT))
+srv <- create_server(site_data, min_n = MIN_N, min_cell = MIN_CELL)
+cat(sprintf("[api_server] Loaded %d rows. min_n=%d, min_cell=%d. Listening on port %d.\n",
+            nrow(site_data), MIN_N, MIN_CELL, PORT))
 
 # ------------------------------------------------------------------
 # Helpers: input validation for the structured model_spec protocol
@@ -242,13 +246,16 @@ pr$handle("POST", "/group_summaries", function(req, res) {
       stop(paste0("Variable(s) not found in dataset: ",
                   paste(missing_vars, collapse = ", ")))
     r <- srv$group_summaries(varname, groupvar)
-    
-    # Convert each group's stats list to JSON-safe form
+
+    # Convert each group's stats list to JSON-safe form. A group below the
+    # privacy threshold comes back as {suppressed:true} with no numbers —
+    # pass that through unchanged (do NOT synthesise n/sum/sumsq for it).
     stats_out <- lapply(r$stats, function(z) {
-      list(n = z$n, sum = z$sum, sumsq = z$sumsq)
+      if (isTRUE(z$suppressed)) list(suppressed = TRUE)
+      else list(n = z$n, sum = z$sum, sumsq = z$sumsq)
     })
-    
-    list(type = r$type, stats = stats_out)
+
+    list(type = r$type, stats = stats_out, min_cell = r$min_cell)
   }, error = function(e) {
     res$status <- 400
     list(error = conditionMessage(e))
@@ -267,12 +274,18 @@ pr$handle("POST", "/counts_2x2", function(req, res) {
       stop(paste0("Variable(s) not found in dataset: ",
                   paste(missing_vars, collapse = ", ")))
     r <- srv$counts_2x2(xvar, yvar)
-    list(
-      type = r$type,
-      n00  = r$n00, n01 = r$n01,
-      n10  = r$n10, n11 = r$n11,
-      n    = r$n
-    )
+    # If any cell was below the threshold the whole table is withheld —
+    # forward the marker (and only the safe total), never the cells.
+    if (isTRUE(r$suppressed)) {
+      list(type = r$type, suppressed = TRUE, n = r$n, min_cell = r$min_cell)
+    } else {
+      list(
+        type = r$type,
+        n00  = r$n00, n01 = r$n01,
+        n10  = r$n10, n11 = r$n11,
+        n    = r$n
+      )
+    }
   }, error = function(e) {
     res$status <- 400
     list(error = conditionMessage(e))
@@ -314,25 +327,22 @@ pr$handle("GET", "/health", function(req, res) {
 })
 
 # ------------------------------------------------------------------
-# Start — bind to Tailscale interface if available
+# Start — bind to the Tailscale interface (the system's trust boundary).
+# Uses the shared fed_bind_host() so the "no Tailscale -> loopback, never
+# 0.0.0.0" rule lives in exactly one place. Without Tailscale the server is
+# reachable only from this machine, so patient-derived aggregates are never
+# exposed to the LAN/internet by a misconfiguration. FED_BIND_HOST overrides
+# for operators who genuinely run on another private network.
 # ------------------------------------------------------------------
-BIND_HOST <- tryCatch({
-  ip <- trimws(system("tailscale ip -4 2>/dev/null", intern = TRUE,
-                      ignore.stderr = TRUE))
-  if (length(ip) > 0L && nzchar(ip[1L]) &&
-      grepl("^100\\.", ip[1L])) {
-    ip[1L]
-  } else {
-    ""
-  }
-}, error = function(e) "")
-
-if (nzchar(BIND_HOST)) {
-  cat(sprintf("[api_server] Binding to Tailscale interface: %s\n", BIND_HOST))
+bind <- fedstats::fed_bind_host()
+if (isTRUE(bind$forced)) {
+  cat(sprintf("[api_server] Binding to FED_BIND_HOST override: %s\n", bind$host))
+} else if (isTRUE(bind$tailscale)) {
+  cat(sprintf("[api_server] Binding to Tailscale interface: %s\n", bind$host))
 } else {
-  cat(paste0("[api_server] WARNING: Tailscale not detected. Binding to 0.0.0.0 ",
-             "(all interfaces). For production use, connect Tailscale first.\n"))
-  BIND_HOST <- "0.0.0.0"
+  cat(paste0("[api_server] WARNING: Tailscale not detected. Binding to loopback ",
+             "(127.0.0.1) — the coordinator on another machine cannot reach this ",
+             "site until Tailscale is connected. (Set FED_BIND_HOST to override.)\n"))
 }
 
-pr$run(host = BIND_HOST, port = PORT)
+pr$run(host = bind$host, port = PORT)

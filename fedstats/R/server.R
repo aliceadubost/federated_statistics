@@ -17,6 +17,14 @@
 #' @param site_data A \code{data.frame} or a path to a CSV file.
 #' @param min_n Integer. Minimum number of rows required. Sites with fewer
 #'   rows throw an error (default \code{1}).
+#' @param min_cell Integer. Privacy threshold for individual cells: any
+#'   per-group summary cell or 2x2 contingency cell covering fewer than
+#'   \code{min_cell} patients is withheld (never returned), because a small
+#'   cell can reveal an individual patient's exact value. This is the
+#'   statistical-disclosure-control "threshold rule" (default \code{5}, the
+#'   most widely used value in medical data disclosure control). It is
+#'   separate from \code{min_n} (whole-site participation) and cannot be
+#'   lowered by the caller over the wire.
 #'
 #' @return A named list of functions with the same interface as
 #'   \code{\link{create_remote_server}}: \code{termnames},
@@ -31,7 +39,7 @@
 #' }
 #'
 #' @export
-create_server <- function(site_data, min_n = 1) {
+create_server <- function(site_data, min_n = 1, min_cell = 5) {
   if (is.character(site_data)) {
     site_data <- read.csv(site_data, stringsAsFactors = FALSE,
                           na.strings = c("", "NA", "NaN", "NULL"))
@@ -39,6 +47,7 @@ create_server <- function(site_data, min_n = 1) {
   if (!is.data.frame(site_data))
     stop("create_server(): site_data must be a data.frame or a CSV path.")
   df <- site_data
+  min_cell <- max(1L, as.integer(min_cell))   # a threshold of 0 would disable protection
   if (nrow(df) < min_n)
     stop(sprintf("Site has fewer than %d rows and cannot participate.", min_n))
 
@@ -113,10 +122,16 @@ create_server <- function(site_data, min_n = 1) {
       lvls  <- sort(unique(g))
       stats <- lapply(lvls, function(lv) {
         xi <- x[g == lv]
-        list(n = length(xi), sum = sum(xi), sumsq = sum(xi * xi))
+        # Per-group privacy gate: a group of, say, 1 patient would return
+        # sum = that patient's exact value. Withhold the whole cell (no n,
+        # no sum, no sumsq) — only the level name and a flag leave the site.
+        if (length(xi) < min_cell)
+          list(suppressed = TRUE)
+        else
+          list(n = length(xi), sum = sum(xi), sumsq = sum(xi * xi))
       })
       names(stats) <- lvls
-      list(type = "group_numeric", stats = stats)
+      list(type = "group_numeric", stats = stats, min_cell = min_cell)
     },
 
     # ---- 2x2 contingency counts ----
@@ -132,14 +147,32 @@ create_server <- function(site_data, min_n = 1) {
         ))
       if (any(!x %in% c(0, 1)) || any(!y %in% c(0, 1)))
         stop("counts_2x2(): both variables must be binary (0/1).")
+      cells <- c(n00 = sum(x == 0 & y == 0), n01 = sum(x == 0 & y == 1),
+                 n10 = sum(x == 1 & y == 0), n11 = sum(x == 1 & y == 1))
+      # If ANY non-empty cell is below the privacy threshold, withhold the
+      # ENTIRE table. Suppressing just the small cell is useless: it can be
+      # recovered by subtraction from the row/column margins and the total.
+      # (A genuine zero cell is not disclosive, so it doesn't trigger this.)
+      if (any(cells > 0 & cells < min_cell))
+        return(list(type = "2x2", suppressed = TRUE,
+                    n = length(x), min_cell = min_cell))
       list(type = "2x2",
-           n00 = sum(x == 0 & y == 0), n01 = sum(x == 0 & y == 1),
-           n10 = sum(x == 1 & y == 0), n11 = sum(x == 1 & y == 1),
+           n00 = unname(cells["n00"]), n01 = unname(cells["n01"]),
+           n10 = unname(cells["n10"]), n11 = unname(cells["n11"]),
            n   = length(x))
     },
 
     # ---- pre-analysis data validation ----
-    validate_data = function(vars_spec, formula = NULL, min_n = 20L) {
+    # `min_n_formula` is the caller's recommended complete-case count for the
+    # formula feasibility flag only. All privacy gating below uses the
+    # server's own min_n / min_cell (captured in this closure), NEVER a
+    # caller-supplied value — so a client cannot lower the threshold to
+    # unlock small-sample values over the wire.
+    validate_data = function(vars_spec, formula = NULL, min_n_formula = 20L) {
+      # Order statistics (quartiles/median) can coincide with an individual's
+      # value, so they need a comfortably large sample before release.
+      quant_gate <- max(min_n, min_cell)
+
       var_reports <- lapply(names(vars_spec), function(vname) {
         spec  <- vars_spec[[vname]]
         vtype <- spec$type
@@ -163,32 +196,49 @@ create_server <- function(site_data, min_n = 1) {
           x_valid      <- x[!is.na(x)]
           vrep$n_valid <- length(x_valid)
           if (length(x_valid) > 0) {
-            vrep$mean   <- round(mean(x_valid), 4)
-            vrep$sd     <- if (length(x_valid) > 1) round(sd(x_valid), 4) else NA_real_
-            vrep$min    <- unname(min(x_valid))
-            vrep$q25    <- unname(quantile(x_valid, 0.25))
-            vrep$median <- unname(median(x_valid))
-            vrep$q75    <- unname(quantile(x_valid, 0.75))
-            vrep$max    <- unname(max(x_valid))
+            # For a binary variable, a tiny class makes even the mean
+            # disclosive (mean * n recovers the small class count), so treat
+            # a small class the same as a small sample.
+            small_binary <- FALSE
+            if (vtype == "binary") {
+              n0 <- sum(x_valid == 0); n1 <- sum(x_valid == 1)
+              small_binary <- (n0 > 0 && n0 < min_cell) ||
+                              (n1 > 0 && n1 < min_cell)
+            }
+            # Aggregate summaries only when enough patients back them — a
+            # mean/sd over 1-2 people is effectively an individual value.
+            # min/max are always the exact values of specific patients and
+            # are never returned.
+            if (length(x_valid) >= min_cell && !small_binary) {
+              vrep$mean <- round(mean(x_valid), 4)
+              vrep$sd   <- if (length(x_valid) > 1) round(sd(x_valid), 4) else NA_real_
+            } else {
+              vrep$summary_suppressed <- TRUE
+            }
+            if (length(x_valid) >= quant_gate && !small_binary) {
+              vrep$q25    <- unname(quantile(x_valid, 0.25))
+              vrep$median <- unname(median(x_valid))
+              vrep$q75    <- unname(quantile(x_valid, 0.75))
+            }
             if (!is.null(spec$min) && !is.null(spec$max)) {
               oor_mask            <- x_valid < spec$min | x_valid > spec$max
               n_oor               <- sum(oor_mask)
               vrep$expected_range <- c(spec$min, spec$max)
               vrep$n_out_of_range <- n_oor
-              if (n_oor > 0) {
-                vals <- sort(unique(x_valid[oor_mask]))
-                vals_str <- if (length(vals) > 10)
-                  paste0(paste(head(vals, 10), collapse = ", "), ", ...")
-                else paste(vals, collapse = ", ")
+              if (n_oor > 0)
+                # Report only HOW MANY values are out of range, never the
+                # values themselves — an out-of-range value is exactly the
+                # kind of unique outlier that identifies a patient.
                 vrep$range_warning <- paste0(
                   n_oor, " value(s) outside expected range [",
-                  spec$min, ", ", spec$max, "]: ", vals_str)
-              }
+                  spec$min, ", ", spec$max, "].")
             }
             if (vtype == "binary") {
               n_invalid <- sum(!x_valid %in% c(0, 1))
-              vrep$n0   <- sum(x_valid == 0)
-              vrep$n1   <- sum(x_valid == 1)
+              # Class counts are disclosive when a class is tiny; release
+              # them only when both classes clear the threshold.
+              if (!small_binary) { vrep$n0 <- n0; vrep$n1 <- n1 }
+              else vrep$counts_suppressed <- TRUE
               if (n_invalid > 0)
                 vrep$binary_error <- paste0(n_invalid, " value(s) not in {0, 1}.")
             }
@@ -196,9 +246,14 @@ create_server <- function(site_data, min_n = 1) {
         } else if (vtype == "categorical") {
           col_char  <- as.character(col)
           col_valid <- col_char[!is.na(col) & nzchar(col_char) & col_char != "NA"]
+          tab        <- table(col_valid)
           found_lvls <- sort(unique(col_valid))
-          vrep$levels_found <- as.list(found_lvls)
-          vrep$level_counts <- as.list(table(col_valid))
+          # Report which levels exist, but withhold the COUNT of any level
+          # below the threshold — a level of size 1-4 pinpoints individuals.
+          small <- tab > 0 & tab < min_cell
+          vrep$levels_found        <- as.list(found_lvls)
+          vrep$level_counts        <- as.list(tab[!small])
+          vrep$n_levels_suppressed <- as.integer(sum(small))
           if (!is.null(spec$levels)) {
             exp_lvls <- unlist(spec$levels)
             unexp    <- setdiff(found_lvls, exp_lvls)
@@ -223,7 +278,7 @@ create_server <- function(site_data, min_n = 1) {
           list(formula    = paste(deparse(formula), collapse = ""),
                n_complete = nc,
                feasible   = nc > 0,
-               low_n      = nc > 0 && nc < as.integer(min_n))
+               low_n      = nc > 0 && nc < as.integer(min_n_formula))
         }, error = function(e) {
           list(formula  = paste(deparse(formula), collapse = ""),
                feasible = FALSE, error = conditionMessage(e))

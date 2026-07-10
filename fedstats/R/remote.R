@@ -175,15 +175,28 @@ create_remote_server <- function(base_url,
     group_summaries = function(varname, groupvar) {
       r <- .remote_post(base_url, "/group_summaries",
                         list(varname = varname, groupvar = groupvar), token)
+      # A group whose count is below the site's privacy threshold comes back
+      # as {suppressed:true} with no statistics — pass that marker through
+      # unchanged so the pooling layer can exclude it and warn.
       stats <- lapply(r$stats, function(z) {
-        list(n = as.integer(z$n), sum = as.numeric(z$sum), sumsq = as.numeric(z$sumsq))
+        if (isTRUE(z$suppressed))
+          list(suppressed = TRUE)
+        else
+          list(n = as.integer(z$n), sum = as.numeric(z$sum), sumsq = as.numeric(z$sumsq))
       })
-      list(type = r$type, stats = stats)
+      list(type = r$type, stats = stats,
+           min_cell = if (!is.null(r$min_cell)) as.integer(r$min_cell) else NA_integer_)
     },
 
     counts_2x2 = function(xvar, yvar) {
       r <- .remote_post(base_url, "/counts_2x2",
                         list(xvar = xvar, yvar = yvar), token)
+      # If any cell was below the threshold the whole table is withheld
+      # ({suppressed:true}); surface that so the chi-square layer refuses
+      # rather than computing on an incomplete table.
+      if (isTRUE(r$suppressed))
+        return(list(type = r$type, suppressed = TRUE, n = as.integer(r$n),
+                    min_cell = if (!is.null(r$min_cell)) as.integer(r$min_cell) else NA_integer_))
       list(type = r$type,
            n00  = as.integer(r$n00), n01 = as.integer(r$n01),
            n10  = as.integer(r$n10), n11 = as.integer(r$n11),

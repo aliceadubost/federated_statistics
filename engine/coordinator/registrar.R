@@ -219,11 +219,14 @@ pr$handle("POST", "/register", function(req, res) {
 
 # ---- start: bind to Tailscale interface (shared helper) --------
 bind <- fed_bind_host()
-if (bind$tailscale) {
+if (isTRUE(bind$forced)) {
+  cat(sprintf("[registrar] Binding to FED_BIND_HOST override: %s:%d\n", bind$host, PORT))
+} else if (bind$tailscale) {
   cat(sprintf("[registrar] Binding to Tailscale interface: %s:%d\n", bind$host, PORT))
 } else {
-  cat(paste0("[registrar] WARNING: Tailscale not detected. Binding to 0.0.0.0 ",
-             "(all interfaces). For production use, connect Tailscale first.\n"))
+  cat(paste0("[registrar] WARNING: Tailscale not detected. Binding to loopback ",
+             "(127.0.0.1) — sites on other machines cannot reach this registrar ",
+             "until Tailscale is connected. (Set FED_BIND_HOST to override.)\n"))
 }
 cat(sprintf("[registrar] Registry file: %s\n", REG_FILE))
 perm_warn <- reg_check_perms(REG_FILE)

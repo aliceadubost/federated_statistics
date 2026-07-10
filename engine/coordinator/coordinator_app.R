@@ -820,6 +820,11 @@ server <- function(input, output, session) {
     ss     <- lapply(sites, function(s) create_remote_server(s$url, s$token))
     script <- input$script_file$datapath
 
+    # capture.output() only grabs printed output; warnings go to stderr and
+    # would be lost. Collect them via a calling handler so privacy-suppression
+    # notices (raised by fed_group_numeric et al.) reach the operator.
+    warn_msgs <- character(0)
+
     withProgress(
       message = paste("Running:", rv$meta$title), value = 0, {
 
@@ -830,17 +835,37 @@ server <- function(input, output, session) {
 
       incProgress(0.10, detail = "Sourcing analysis script…")
       captured <- tryCatch(
-        capture.output(source(script, local = env)),
+        withCallingHandlers(
+          capture.output(source(script, local = env)),
+          warning = function(w) {
+            warn_msgs <<- c(warn_msgs, conditionMessage(w))
+            invokeRestart("muffleWarning")
+          }
+        ),
         error = function(e) {
           showNotification(paste("Script error:", conditionMessage(e)),
                            type = "error", duration = 15)
           character(0)
         }
       )
-      rv$console_log <- if (length(captured)) paste(captured, collapse = "\n") else ""
+      log_parts <- captured
+      if (length(warn_msgs))
+        log_parts <- c(log_parts, "", "──────── Warnings ────────", warn_msgs)
+      rv$console_log <- if (length(log_parts)) paste(log_parts, collapse = "\n") else ""
 
       incProgress(1, detail = "Done")
     })
+
+    # Privacy suppression changes what the results mean (some small subgroups
+    # were withheld), so surface it prominently — a sticky warning, not buried
+    # in the log.
+    if (any(grepl("Privacy suppression", warn_msgs)))
+      showNotification(
+        HTML(paste0("<b>Privacy protection applied.</b> One or more small subgroups ",
+                    "(fewer patients than the privacy threshold) were hidden to protect ",
+                    "individual patients. Affected pooled figures exclude the withheld ",
+                    "site(s) — see the Console log for details.")),
+        type = "warning", duration = NULL)
 
     result <- get_outputs()
     if (length(result) == 0) {

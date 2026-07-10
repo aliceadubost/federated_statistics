@@ -87,15 +87,17 @@ Each template has `# ── ADAPT:` comments marking the lines you need to chang
 
 **What the tool does:**
 - No patient rows ever leave the site. Only aggregate statistics are transmitted: counts, sums, sums of squares, and model gradients.
-- Every aggregate returned by a site is based on at least **`min_n` rows** (default: 20). Queries that would reveal statistics from fewer rows are refused with an error. This is enforced at the site server, not just at startup.
+- Every aggregate returned by a site is based on at least **`min_n` rows** (default: 20, `FED_MIN_N`). Queries that would reveal statistics from fewer rows are refused with an error. This is enforced at the site server, not just at startup.
+- **Small-cell suppression (`min_cell`, default: 5, `FED_MIN_CELL`).** Within an analysis, any *individual* cell backed by fewer than `min_cell` patients is withheld, never transmitted — this is the standard medical disclosure-control "threshold rule". It applies to per-group summaries (a group of 1 would otherwise reveal that patient's exact value), 2×2 contingency cells (the whole table is withheld if any cell is small, since a single cell is recoverable from the margins), and the per-variable validation report (exact minimum/maximum and out-of-range values are never returned; means, quartiles and class counts are released only above the threshold). Descriptive tables still report every adequately-sized group and flag the suppressed ones; inferential tests (Welch t, chi-square) that would need a suppressed cell refuse rather than return a silently biased result. This threshold **cannot be lowered by the coordinator over the wire** — it is the site's own setting.
+- Without Tailscale, a site binds to **loopback only** (`127.0.0.1`), never to all interfaces — so a site whose VPN is down or misconfigured cannot expose patient-derived aggregates to its local network. (`FED_BIND_HOST` overrides this for operators on a different private network.)
 - Each site controls its own server. Site operators can see every query being made and stop the server at any time.
 - **Per-site tokens.** Joining via an invite is the only onboarding path, and every invite carries its own unique token — so a leaked invite or token affects only that one site, never the whole study.
 - **Signed invites.** Invites are signed with the coordinator's Ed25519 key; the site verifies the signature and pins the key on first use (and can verify a short key fingerprint out of band). The coordinator's registration listener accepts a registration only with a valid invite token *and* a valid signature, is rate-limited, and is bound to the Tailscale interface.
 - Network traffic between sites and coordinator is encrypted by Tailscale (WireGuard). The API itself runs over plain HTTP within that encrypted tunnel.
 
 **Known limitations:**
-- A coordinator who issues many carefully chosen narrow queries could potentially infer information about small groups, even with `min_n` enforcement. This tool does not implement differential privacy. For analyses involving very sensitive subgroups, consult your institution's data governance team.
-- The `min_n` threshold is a configurable floor, not a formal privacy guarantee. Higher values provide stronger protection at the cost of excluding sites with small datasets.
+- A coordinator who issues many carefully chosen narrow queries could potentially infer information about small groups, even with `min_n` and `min_cell` enforcement. This tool does not implement differential privacy. For analyses involving very sensitive subgroups, consult your institution's data governance team.
+- The `min_n` and `min_cell` thresholds are configurable floors, not a formal privacy guarantee. Higher values provide stronger protection at the cost of excluding smaller groups. `min_cell = 5` follows the common medical disclosure-control convention; some regimes (e.g. US CMS) use a higher floor of 11.
 - The tool assumes the coordinator is a trusted researcher. It does not protect against a malicious coordinator who has legitimate access.
 
 ---
