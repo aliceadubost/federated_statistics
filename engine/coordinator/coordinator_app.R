@@ -124,6 +124,18 @@ cap_print <- function(expr) {
   paste(buf, collapse = "\n")
 }
 
+# A "mailto:" link opens the user's own already-signed-in email client
+# with the message pre-filled — no SMTP server, no credentials stored in
+# the app, nothing new to maintain. They just add a recipient and hit
+# send. (Real send-from-the-app was considered and rejected: it would
+# need stored email credentials and its own deliverability/spam problems
+# for marginal convenience over this.)
+build_mailto_link <- function(subject, body) {
+  sprintf("mailto:?subject=%s&body=%s",
+         utils::URLencode(subject, reserved = TRUE),
+         utils::URLencode(body, reserved = TRUE))
+}
+
 # One ready-to-send message for a brand-new site operator with nothing
 # installed yet: Tailscale (the one unavoidable manual step — nothing can
 # reach a machine that isn't on the tailnet yet), the self-hosted kit link,
@@ -582,6 +594,12 @@ server <- function(input, output, session) {
     kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/get", COORD_ADDR) else ""
     onboarding_msg <- if (nzchar(short_link) && nzchar(kit_link))
       build_onboarding_message(study, kit_link, short_link) else ""
+    mailto_subject <- sprintf('Join the "%s" federated study', study)
+    invite_mailto  <- if (nzchar(short_link))
+      build_mailto_link(mailto_subject,
+                        sprintf("Here's your invite to join the study:\n\n%s", short_link)) else ""
+    onboarding_mailto <- if (nzchar(onboarding_msg))
+      build_mailto_link(mailto_subject, onboarding_msg) else ""
 
     removeModal()
     showModal(modalDialog(
@@ -595,7 +613,10 @@ server <- function(input, output, session) {
                    style = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92rem;"),
         div(style = "margin-top:6px; margin-bottom:14px;",
             tags$button("Copy link", class = "btn btn-primary btn-sm",
-                        onclick = "fedCopy('invite_link')"))
+                        onclick = "fedCopy('invite_link')"),
+            if (nzchar(invite_mailto))
+              tags$a("Open in email", href = invite_mailto,
+                     class = "btn btn-default btn-sm", style = "margin-left:6px;"))
       ),
       div(class = "sec-lbl", "Full invite text"),
       tags$textarea(id = "invite_str", class = "inv-box", readonly = NA, invite),
@@ -625,7 +646,10 @@ server <- function(input, output, session) {
                           style = "height:220px;", onboarding_msg),
             div(style = "margin-top:6px;",
                 tags$button("Copy onboarding message", class = "btn btn-primary btn-sm",
-                            onclick = "fedCopy('onboard_msg')")))
+                            onclick = "fedCopy('onboard_msg')"),
+                if (nzchar(onboarding_mailto))
+                  tags$a("Open in email", href = onboarding_mailto,
+                         class = "btn btn-default btn-sm", style = "margin-left:6px;")))
       ),
       div(class = "fp", style = "margin-top:10px;",
           "Your key fingerprint (read it to the operator to verify): ",
