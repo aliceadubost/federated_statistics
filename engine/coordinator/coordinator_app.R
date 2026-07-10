@@ -536,22 +536,37 @@ server <- function(input, output, session) {
     sid   <- fed_sid()
     token <- fed_token()
     exp   <- as.integer(Sys.time()) + INVITE_TTL_DAYS * 86400L
-    reg_modify(REG_FILE, function(reg)
-      reg_add_invite(reg, sid, name, study, token, exp))
-    rv$reg <- reg_load(REG_FILE)
 
     invite <- fed_invite_create(
       study = study, coord = COORD_ADDR, sid = sid, token = token,
       private_key = COORD_KEY$private, name = name, ttl_days = INVITE_TTL_DAYS)
 
+    # Store the invite text itself (not just the registry state) so the
+    # registrar can serve it back at a short link.
+    reg_modify(REG_FILE, function(reg)
+      reg_add_invite(reg, sid, name, study, token, exp, invite = invite))
+    rv$reg <- reg_load(REG_FILE)
+
+    short_link <- if (nzchar(COORD_ADDR)) sprintf("http://%s/i/%s", COORD_ADDR, sid) else ""
+
     removeModal()
     showModal(modalDialog(
       title = "Invite created",
-      p("Send this invite to the site operator. It expires in ",
+      p("Send either of these to the site operator — both work. It expires in ",
         strong(paste0(INVITE_TTL_DAYS, " day(s)")), "."),
+      if (nzchar(short_link)) tagList(
+        div(class = "sec-lbl", "Short link (easiest to share)"),
+        tags$input(id = "invite_link", class = "form-control", readonly = NA,
+                   value = short_link,
+                   style = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92rem;"),
+        div(style = "margin-top:6px; margin-bottom:14px;",
+            tags$button("Copy link", class = "btn btn-primary btn-sm",
+                        onclick = "fedCopy('invite_link')"))
+      ),
+      div(class = "sec-lbl", "Full invite text"),
       tags$textarea(id = "invite_str", class = "inv-box", readonly = NA, invite),
       div(style = "margin-top:6px;",
-          tags$button("Copy", class = "btn btn-primary btn-sm",
+          tags$button("Copy text", class = "btn btn-default btn-sm",
                       onclick = "fedCopy('invite_str')")),
       div(class = "fp", style = "margin-top:10px;",
           "Your key fingerprint (read it to the operator to verify): ",

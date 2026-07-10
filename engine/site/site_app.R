@@ -353,6 +353,24 @@ server <- function(input, output, session) {
     if (!nzchar(raw)) {
       showNotification("Paste an invite first.", type = "warning"); return()
     }
+
+    # A short link (http://coord:8731/i/<sid>) instead of the full invite
+    # text is also accepted — resolve it to the real invite first.
+    if (grepl("^https?://", raw, ignore.case = TRUE)) {
+      raw <- tryCatch({
+        resp <- httr::GET(raw, httr::timeout(8))
+        if (httr::status_code(resp) != 200)
+          stop("That link didn't return an invite — it may have expired.")
+        inv <- httr::content(resp, as = "parsed")$invite
+        if (is.null(inv) || !nzchar(inv)) stop("That link didn't return an invite.")
+        inv
+      }, error = function(e) {
+        showNotification(conditionMessage(e), type = "error", duration = 10)
+        NA_character_
+      })
+      if (is.na(raw)) return()
+    }
+
     pr <- fedstats::fed_invite_parse(raw)
     if (!isTRUE(pr$ok)) {
       showNotification(pr$reason, type = "error", duration = 10); return()

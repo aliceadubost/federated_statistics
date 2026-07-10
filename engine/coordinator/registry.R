@@ -74,7 +74,10 @@ reg_normalize_row <- function(r) {
     sid = NA_character_, name = "", study = "", token = NA_character_,
     site_addr = NULL, site_pk = NULL, invite_state = "issued",
     conn_status = "unknown", created_at = NA_integer_, exp = NA_integer_,
-    registered_at = NULL, last_seen = NULL, pending = NULL
+    registered_at = NULL, last_seen = NULL, pending = NULL,
+    invite = NA_character_  # full invite text, so the registrar can serve
+                             # it back at a short link (/i/<sid>) instead of
+                             # the operator having to paste the whole thing
   )
   for (k in names(defaults)) if (is.null(r[[k]])) r[[k]] <- defaults[[k]]
   r
@@ -156,11 +159,12 @@ reg_expire <- function(reg, now = as.integer(Sys.time())) {
 # Invite issuance / revocation (called by the Shiny app)
 # ------------------------------------------------------------------
 reg_add_invite <- function(reg, sid, name, study, token, exp,
-                           now = as.integer(Sys.time())) {
+                           invite = NA_character_, now = as.integer(Sys.time())) {
   reg$sites[[sid]] <- reg_normalize_row(list(
     sid = sid, name = name, study = study, token = token,
     invite_state = "issued", conn_status = "unknown",
-    created_at = as.integer(now), exp = as.integer(exp)
+    created_at = as.integer(now), exp = as.integer(exp),
+    invite = invite
   ))
   reg
 }

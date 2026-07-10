@@ -52,11 +52,40 @@ rate_ok <- function(ip) {
 
 pr <- plumber::Plumber$new()
 
+# auto_unbox=TRUE: plumber's default serializer wraps scalar fields in
+# single-element arrays (e.g. {"invite":["FEDSTAT2..."]}), which silently
+# turns body$invite into a length-1 list instead of a plain string on the
+# client side after httr parses it. Matches api_server.R's convention.
+pr$setSerializer(plumber::serializer_json(auto_unbox = TRUE))
+
 #* @apiTitle Federated Statistics Coordinator Registrar
 
 # ---- liveness (unauthenticated) --------------------------------
 pr$handle("GET", "/ping", function(req, res) {
   list(status = "ok", service = "registrar", port = PORT)
+})
+
+# ---- short invite link -------------------------------------------
+# Resolves /i/<sid> to the full invite text, so an operator only has to
+# be sent (and paste) a short URL instead of the ~450-char invite blob.
+# Only reachable on the Tailscale interface, same as everything else here
+# — and a site operator must already be on the tailnet before they'd ever
+# be pasting an invite, so this adds no new audience beyond who could
+# already reach /register.
+pr$handle("GET", "/i/<sid>", function(req, res, sid) {
+  ip <- if (!is.null(req$REMOTE_ADDR)) req$REMOTE_ADDR else "unknown"
+  if (!rate_ok(ip)) {
+    res$status <- 429
+    return(list(error = "Too many requests. Try again shortly."))
+  }
+  reg <- reg_load(REG_FILE)
+  r <- reg$sites[[sid]]
+  if (is.null(r) || is.null(r$invite) || is.na(r$invite) ||
+      (!is.na(r$exp) && as.integer(Sys.time()) >= r$exp)) {
+    res$status <- 404
+    return(list(error = "Invite not found or expired."))
+  }
+  list(invite = r$invite)
 })
 
 # ---- site registration callback --------------------------------
