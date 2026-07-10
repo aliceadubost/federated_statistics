@@ -104,6 +104,27 @@ fed_token <- function(nbytes = 24L) {
   .b64url_encode(sodium::random(as.integer(nbytes)))
 }
 
+#' Constant-time string equality
+#'
+#' Compares two strings without an early-exit branch, so the time taken does
+#' not depend on how many leading characters match. Use this (not \code{==}
+#' or \code{identical()}) when comparing a secret such as a bearer token, so
+#' the secret cannot be recovered character-by-character through a timing
+#' side-channel. Token length is not itself secret (tokens have a fixed
+#' length), so returning early on a length mismatch is acceptable.
+#'
+#' @param a,b Character scalars.
+#' @return \code{TRUE} iff the two strings are byte-for-byte identical.
+#' @export
+fed_ct_equal <- function(a, b) {
+  if (!is.character(a) || !is.character(b) ||
+      length(a) != 1L || length(b) != 1L ||
+      is.na(a) || is.na(b)) return(FALSE)
+  ra <- as.integer(charToRaw(a)); rb <- as.integer(charToRaw(b))
+  if (length(ra) != length(rb)) return(FALSE)
+  sum(bitwXor(ra, rb)) == 0L
+}
+
 #' Generate a unique site id
 #'
 #' @return A short id like \code{"s_7f3a9c2e1b0d"}.

@@ -149,7 +149,12 @@ pr$handle("GET", "/i/<sid>", function(req, res, sid) {
   }
   reg <- reg_load(REG_FILE)
   r <- reg$sites[[sid]]
-  if (is.null(r) || is.null(r$invite) || is.na(r$invite) ||
+  # Stop handing out an invite once it is no longer needed: expired by time,
+  # or already consumed/revoked. After a site has registered, nobody needs
+  # the short link again, so a consumed invite (which still carries its
+  # token) is never served to another tailnet peer who guesses the sid.
+  spent <- !is.null(r) && isTRUE(r$invite_state %in% c("consumed", "revoked", "expired"))
+  if (is.null(r) || is.null(r$invite) || is.na(r$invite) || spent ||
       (!is.na(r$exp) && as.integer(Sys.time()) >= r$exp)) {
     res$status <- 404
     return(list(error = "Invite not found or expired."))

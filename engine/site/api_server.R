@@ -104,7 +104,7 @@ check_token <- function(req) {
   if (is.null(auth) || !grepl("^Bearer ", auth)) {
     stop("Unauthorized: missing or malformed Authorization header.")
   }
-  if (sub("^Bearer ", "", auth) != TOKEN) {
+  if (!fedstats::fed_ct_equal(sub("^Bearer ", "", auth), TOKEN)) {
     stop("Unauthorized: invalid token.")
   }
   invisible(NULL)

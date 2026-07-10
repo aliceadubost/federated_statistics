@@ -214,7 +214,9 @@ reg_register <- function(reg, sid, token, site_addr, site_pk,
 
   r <- reg$sites[[sid]]
   if (is.null(r))                       return(deny(404L, "Unknown invite."))
-  if (is.na(r$token) || !identical(token, r$token))
+  # Constant-time compare so the per-site token can't be recovered byte by
+  # byte through response timing.
+  if (is.na(r$token) || !fedstats::fed_ct_equal(token, r$token))
                                         return(deny(401L, "Invalid token for this invite."))
   if (reg_is_revoked(reg, token) || identical(r$invite_state, "revoked"))
                                         return(deny(403L, "This invite has been revoked."))
