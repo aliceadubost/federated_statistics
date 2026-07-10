@@ -187,53 +187,65 @@ ui <- fluidPage(
       --bad-bg:#FEE2E2; --bad-fg:#991B1B;
       --muted-bg:#F1F5F9; --muted-fg:#64748B;
     }
+    html  { font-size:16px; }
     body  { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-            color:var(--ink); }
-    .well { background-color:var(--tint); border-color:var(--line); border-radius:10px; }
-    h2    { color:var(--ink); font-weight:700; letter-spacing:-.01em; }
-    .step { font-weight:700; font-size:0.8em; margin:16px 0 4px 0;
-            color:var(--ink-muted); text-transform:uppercase; letter-spacing:.06em; }
-    .meta-title { font-size: 1.0em; font-weight: 700; color: var(--ink);
-                  margin: 4px 0 1px 0; }
-    .meta-vars  { font-size: 0.78em; color: var(--ink-muted); margin-bottom: 4px;
+            color:var(--ink); font-size:1rem; line-height:1.6; }
+    .well { background-color:#fff; border:1px solid var(--line); border-radius:14px;
+            box-shadow:0 6px 20px rgba(15,23,42,.05); padding:20px; }
+    h2    { color:var(--ink); font-weight:800; font-size:2.1rem; letter-spacing:-.02em;
+            padding-bottom:18px; margin-bottom:22px; border-bottom:1px solid var(--line); }
+    .step { font-weight:800; font-size:0.88rem; margin:18px 0 6px 0;
+            color:var(--brand-deep); text-transform:uppercase; letter-spacing:.07em; }
+    .meta-title { font-size: 1.05rem; font-weight: 700; color: var(--ink);
+                  margin: 6px 0 2px 0; }
+    .meta-vars  { font-size: 0.85rem; color: var(--ink-muted); margin-bottom: 6px;
                   word-break: break-word; }
-    pre  { font-size: 0.80em; background: #F8FAFC; border: 1px solid var(--line);
-           border-radius: 8px; padding: 12px; white-space: pre-wrap;
+    pre  { font-size: 0.88rem; background: #F8FAFC; border: 1px solid var(--line);
+           border-radius: 12px; padding: 16px; white-space: pre-wrap;
            max-height: 480px; overflow-y: auto; }
-    .tbl-caption { font-size: 0.82em; color: var(--ink-muted); font-style: italic;
-                   margin: 4px 0 14px 0; }
+    .tbl-caption { font-size: 0.9rem; color: var(--ink-muted); font-style: italic;
+                   margin: 6px 0 16px 0; }
     .welcome { color: var(--ink-muted); padding: 60px 20px; text-align: center; }
-    .welcome h3 { color: var(--ink); }
-    .note { font-size: 0.80em; color: var(--ink-muted); margin-top: 10px; }
+    .welcome h3 { color: var(--ink); border:none; }
+    .note { font-size: 0.85rem; color: var(--ink-muted); margin-top: 12px; line-height:1.5; }
+    .btn, button.btn { border-radius:9px; font-weight:600; transition:all .15s ease; }
     .btn-primary,
     .btn-primary:active,
     .btn-primary.active { background-color: var(--brand) !important;
-                          border-color: var(--brand-dark) !important; }
+                          border-color: var(--brand-dark) !important;
+                          box-shadow:0 2px 8px rgba(37,99,235,.25); }
     .btn-primary:hover,
     .btn-primary:focus  { background-color: var(--brand-dark) !important;
-                          border-color: var(--brand-deep) !important; }
+                          border-color: var(--brand-deep) !important;
+                          box-shadow:0 4px 14px rgba(37,99,235,.35);
+                          transform:translateY(-1px); }
+    .btn-success { background-color:#16A34A !important; border-color:#15803D !important; }
+    .btn-success:hover { background-color:#15803D !important; transform:translateY(-1px); }
+    label { font-weight:600; font-size:.92rem; color:var(--ink-muted); }
     /* ── Sites table ───────────────────────────────────────────── */
-    .sites-tbl { width:100%; font-size:0.82em; border-collapse:collapse; }
-    .sites-tbl th { text-align:left; color:var(--ink-muted); font-size:0.76em;
+    .sites-tbl { width:100%; font-size:0.92rem; border-collapse:collapse; }
+    .sites-tbl th { text-align:left; color:var(--ink-muted); font-size:0.82rem;
                     text-transform:uppercase; letter-spacing:.04em;
-                    border-bottom:1px solid var(--line); padding:6px 4px; }
-    .sites-tbl td { padding:6px 4px; border-bottom:1px solid var(--line);
+                    border-bottom:2px solid var(--line); padding:8px 6px; }
+    .sites-tbl td { padding:9px 6px; border-bottom:1px solid var(--line);
                     vertical-align:middle; word-break:break-all; }
-    .sbadge { display:inline-block; padding:2px 10px; border-radius:20px;
-              font-size:0.72em; font-weight:600; }
+    .sbadge { display:inline-block; padding:3px 12px; border-radius:20px;
+              font-size:0.78rem; font-weight:700; }
     .sb-ok    { background:var(--ok-bg);    color:var(--ok-fg); }
     .sb-info  { background:var(--warn-bg);  color:var(--warn-fg); }
     .sb-warn  { background:var(--bad-bg);   color:var(--bad-fg); }
     .sb-muted { background:var(--muted-bg); color:var(--muted-fg); }
     .coord-addr { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-                  font-size:0.80em; color:var(--brand-deep);
+                  font-size:0.9rem; color:var(--brand-deep);
                   background:var(--tint); border:1px solid #BFDBFE;
-                  border-radius:8px; padding:6px 10px; word-break:break-all; }
+                  border-radius:10px; padding:8px 12px; word-break:break-all;
+                  box-shadow:0 2px 8px rgba(37,99,235,.06); }
     .fp { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-          font-size:0.78em; color:var(--ink-muted); }
-    .inv-box { width:100%; height:120px;
+          font-size:0.85rem; color:var(--ink-muted); }
+    .inv-box { width:100%; height:130px;
                font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-               font-size:0.74em; word-break:break-all; border-radius:8px; border-color:var(--line); }
+               font-size:0.82rem; word-break:break-all; border-radius:10px; border-color:var(--line);
+               padding:12px; }
   "))),
 
   tags$script(HTML("
@@ -249,7 +261,7 @@ ui <- fluidPage(
 
   sidebarLayout(
     sidebarPanel(
-      width = 3,
+      width = 4,
 
       # ---- Step 1: analysis script ----
       div(class = "step", "① Analysis script"),
@@ -260,20 +272,20 @@ ui <- fluidPage(
       # ---- Step 2: sites ----
       div(class = "step", "② Sites"),
       uiOutput("registrar_status_ui"),
-      div(style = "margin:6px 0;",
+      div(style = "margin:8px 0;",
           actionButton("btn_invite", "Invite a site",
-                       class = "btn-primary btn-xs")),
+                       class = "btn-primary btn-sm")),
       uiOutput("sites_table_ui"),
 
       br(),
       actionButton("btn_ping",     "Ping sites",
-                   class = "btn-default btn-sm btn-block"),
+                   class = "btn-default btn-block"),
       br(),
       actionButton("btn_validate", "Validate data",
-                   class = "btn-primary btn-sm btn-block"),
+                   class = "btn-primary btn-block"),
       br(),
       actionButton("btn_run",      "Run analysis",
-                   class = "btn-success btn-sm btn-block"),
+                   class = "btn-success btn-block"),
 
       hr(),
       verbatimTextOutput("ping_out"),
@@ -284,7 +296,7 @@ ui <- fluidPage(
     ),
 
     mainPanel(
-      width = 9,
+      width = 8,
       uiOutput("results_panel")
     )
   )

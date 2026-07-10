@@ -132,47 +132,65 @@ ui <- fluidPage(
       --warn-bg:#FEF3C7; --warn-fg:#92400E;
       --bad-bg:#FEE2E2; --bad-fg:#991B1B;
     }
+    html { font-size:16px; }
     body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
-           color:var(--ink); max-width:860px; margin:0 auto; padding:28px; }
-    h3   { margin-bottom:0; color:var(--ink); font-weight:700; letter-spacing:-.01em; }
-    .bdg { display:inline-block; padding:3px 12px; border-radius:20px;
-           font-size:.82em; font-weight:600; margin-left:10px; vertical-align:middle; }
+           color:var(--ink); max-width:920px; margin:0 auto; padding:36px 32px 48px;
+           font-size:1rem; line-height:1.6; }
+    .app-header { display:flex; align-items:center; gap:12px;
+                  padding-bottom:20px; margin-bottom:24px; border-bottom:1px solid var(--line); }
+    .app-dot { width:12px; height:12px; border-radius:50%; flex:0 0 auto;
+               background:linear-gradient(135deg,var(--brand),var(--brand-deep));
+               box-shadow:0 0 0 4px var(--tint); }
+    h3   { margin:0; color:var(--ink); font-weight:800; font-size:1.9rem; letter-spacing:-.02em; }
+    .bdg { display:inline-block; padding:5px 14px; border-radius:20px;
+           font-size:.8rem; font-weight:700; margin-left:12px; vertical-align:middle;
+           letter-spacing:.01em; }
     .bdg-stopped  { background:var(--bad-bg);  color:var(--bad-fg); }
     .bdg-starting { background:var(--warn-bg); color:var(--warn-fg); }
     .bdg-running  { background:var(--ok-bg);   color:var(--ok-fg); }
-    .addr { background:var(--tint); border:1px solid #BFDBFE; border-radius:10px;
-            padding:14px 18px; margin:14px 0;
-            box-shadow:0 1px 2px rgba(15,23,42,.04); }
-    .addr-lbl { font-size:.74em; font-weight:700; color:var(--brand-deep);
-                text-transform:uppercase; letter-spacing:.06em; }
+    .addr { background:var(--tint); border:1px solid #BFDBFE; border-radius:14px;
+            padding:18px 22px; margin:16px 0;
+            box-shadow:0 4px 14px rgba(37,99,235,.08); }
+    .addr-lbl { font-size:.78rem; font-weight:700; color:var(--brand-deep);
+                text-transform:uppercase; letter-spacing:.07em; }
     .addr-url { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-                font-size:1.18em; color:var(--brand-deep); font-weight:700; margin-top:4px; }
-    .privacy  { background:#F0FDF4; border-left:3px solid #22C55E;
-                border-radius:0 8px 8px 0; padding:10px 14px; margin:14px 0;
-                font-size:.83em; color:var(--ok-fg); }
-    .warn-box { background:#FEF2F2; border-left:3px solid #F87171;
-                border-radius:0 8px 8px 0; padding:10px 14px; margin:14px 0;
-                font-size:.83em; color:var(--bad-fg); }
-    .join-box { background:#fff; border:1px solid var(--line); border-radius:10px;
-                padding:16px 18px; margin:12px 0;
-                box-shadow:0 1px 3px rgba(15,23,42,.05); }
-    .join-status { font-size:.83em; color:var(--brand-deep); margin-top:6px; }
-    .sec-lbl  { font-weight:700; font-size:.78em; color:var(--ink-muted);
-                text-transform:uppercase; letter-spacing:.07em; margin:20px 0 8px 0; }
-    #invite { width:100%; height:90px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-              font-size:.74em; word-break:break-all; border-radius:8px; border-color:var(--line); }
-    #server_log { height:280px; overflow-y:auto; background:#0F172A; color:#E2E8F0;
+                font-size:1.35rem; color:var(--brand-deep); font-weight:700; margin-top:6px; }
+    .privacy  { background:#F0FDF4; border-left:4px solid #22C55E;
+                border-radius:0 10px 10px 0; padding:14px 18px; margin:16px 0;
+                font-size:.95rem; color:var(--ok-fg); box-shadow:0 2px 8px rgba(22,101,52,.06); }
+    .warn-box { background:#FEF2F2; border-left:4px solid #F87171;
+                border-radius:0 10px 10px 0; padding:14px 18px; margin:16px 0;
+                font-size:.95rem; color:var(--bad-fg); box-shadow:0 2px 8px rgba(153,27,27,.06); }
+    .join-box { background:#fff; border:1px solid var(--line); border-radius:14px;
+                padding:22px 24px; margin:14px 0;
+                box-shadow:0 6px 20px rgba(15,23,42,.06); }
+    .join-status { font-size:.95rem; color:var(--brand-deep); margin-top:8px; }
+    .sec-lbl  { font-weight:800; font-size:.88rem; color:var(--ink-muted);
+                text-transform:uppercase; letter-spacing:.08em; margin:28px 0 10px 0; }
+    #invite { width:100%; height:96px; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+              font-size:.85rem; word-break:break-all; border-radius:10px; border-color:var(--line);
+              padding:12px; }
+    #server_log { height:290px; overflow-y:auto; background:#0F172A; color:#E2E8F0;
                   font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
-                  font-size:.76em; border-radius:10px;
-                  padding:12px 16px; white-space:pre-wrap; border:none; }
-    hr { border-color:var(--line); margin:18px 0; }
+                  font-size:.85rem; border-radius:14px;
+                  padding:16px 20px; white-space:pre-wrap; border:none;
+                  box-shadow:0 6px 20px rgba(15,23,42,.15); }
+    hr { border-color:var(--line); margin:22px 0; }
+    .btn, button.btn { border-radius:9px; font-weight:600; padding:9px 20px;
+                       font-size:1rem; transition:all .15s ease; }
+    .btn-sm { padding:8px 18px; font-size:.92rem; }
     .btn-primary,
     .btn-primary:active,
     .btn-primary.active { background-color: var(--brand) !important;
-                          border-color: var(--brand-dark) !important; }
+                          border-color: var(--brand-dark) !important;
+                          box-shadow:0 2px 8px rgba(37,99,235,.25); }
     .btn-primary:hover,
     .btn-primary:focus  { background-color: var(--brand-dark) !important;
-                          border-color: var(--brand-deep) !important; }
+                          border-color: var(--brand-deep) !important;
+                          box-shadow:0 4px 14px rgba(37,99,235,.35);
+                          transform:translateY(-1px); }
+    label { font-weight:600; font-size:.92rem; color:var(--ink-muted); }
+    .selectize-input, select.form-control { border-radius:9px !important; }
   "))),
 
   tags$script(HTML("
@@ -184,8 +202,9 @@ ui <- fluidPage(
     });
   ")),
 
-  tags$h3("Federated Site",
-          uiOutput("status_badge", inline = TRUE)),
+  div(class = "app-header",
+      div(class = "app-dot"),
+      tags$h3("Federated Site", uiOutput("status_badge", inline = TRUE))),
 
   uiOutput("warn_ui"),
 
