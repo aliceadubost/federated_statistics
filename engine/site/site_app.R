@@ -6,11 +6,11 @@
 # Runs the plumber API (api_server.R) as a background subprocess and
 # streams its output into the browser log panel.
 #
-# Phase 2: paste a coordinator invite and click Join. The invite is
-# verified (Ed25519 signature, expiry), the coordinator's key is pinned
-# (TOFU), a per-site key and config are saved, and after the server
-# starts the site registers itself back to the coordinator automatically.
-# The old "type a shared token and Start" flow still works unchanged.
+# Paste a coordinator invite and click Join. The invite is verified
+# (Ed25519 signature, expiry), the coordinator's key is pinned (TOFU), a
+# per-site key and config are saved, and after the server starts the site
+# registers itself back to the coordinator automatically. Joining via
+# invite is required — there is no shared-token / manual-address path.
 # =====================================================================
 suppressPackageStartupMessages({
   library(shiny)
@@ -54,6 +54,24 @@ if (!dir.exists(.data_dir))
     ip  <- trimws(system(cmd, intern = TRUE, ignore.stderr = TRUE))
     if (length(ip) && nzchar(ip[1])) ip[1] else ""
   }, error = function(e) "")
+}
+
+# ---- Automatic port selection ---------------------------------------
+# Nobody who doesn't already know what a port is should have to pick one.
+# Try 8000 upward and use the first free one. httpuv::startServer() binds
+# synchronously and throws immediately on failure (no waiting for a client
+# to connect, unlike a plain socketConnection(server = TRUE)) — it's
+# already a transitive dependency via shiny, so this adds nothing new.
+.port_is_free <- function(port) {
+  tryCatch({
+    srv <- httpuv::startServer("0.0.0.0", port, list())
+    httpuv::stopServer(srv)
+    TRUE
+  }, error = function(e) FALSE)
+}
+.find_free_port <- function(start = 8000L, tries = 50L) {
+  for (p in start:(start + tries - 1L)) if (.port_is_free(p)) return(p)
+  NA_integer_
 }
 
 # ---- Site config persistence ----------------------------------------
@@ -169,9 +187,7 @@ ui <- fluidPage(
   div(class = "sec-lbl", "Configuration"),
 
   fluidRow(
-    column(5, uiOutput("file_ui")),
-    column(3, numericInput("port", "Port", value = 8000, min = 1, max = 65535, step = 1)),
-    column(4, passwordInput("token", "Token", placeholder = "optional"))
+    column(12, uiOutput("file_ui"))
   ),
 
   fluidRow(
@@ -195,15 +211,9 @@ server <- function(input, output, session) {
     config       = .load_config(),
     join_status  = NULL,        # text shown under the Join box
     need_register = FALSE,      # register once the server reaches "running"
-    ts_ip        = .get_ts_ip() # live Tailscale IP, refreshed below
+    ts_ip        = .get_ts_ip(),# live Tailscale IP, refreshed below
+    port         = NA_integer_  # chosen automatically at Start Server time
   )
-
-  # Prefill the token field from a saved config on first load.
-  observe({
-    cfg <- isolate(rv$config)
-    if (!is.null(cfg) && !is.null(cfg$token))
-      updateTextInput(session, "token", value = cfg$token)
-  })
 
   # Re-check Tailscale every few seconds so connecting *after* this app is
   # already open is picked up without restarting it.
@@ -227,17 +237,31 @@ server <- function(input, output, session) {
         rv$log <- c(rv$log, new_lines)
         session$sendCustomMessage("scrollLog", list())
       }
-      if (isolate(rv$status) == "starting" &&
-          any(grepl("Running plumber|Listening|listening on|port",
-                    isolate(rv$log), ignore.case = TRUE))) {
-        rv$status <- "running"
-        # Auto-register once the server is up, if we joined via an invite.
-        if (isolate(rv$need_register) && !is.null(isolate(rv$config))) {
-          msg <- .do_register(isolate(rv$config), as.integer(isolate(input$port)),
-                             isolate(rv$ts_ip))
-          rv$join_status <- msg
-          rv$log <- c(rv$log, paste0("\n--- ", msg, " ---"))
-          rv$need_register <- FALSE
+      if (isolate(rv$status) == "starting") {
+        # Confirm the server is actually answering /health before declaring
+        # it "running" — a log line saying "Listening on port N" only means
+        # api_server.R printed that *before* attempting to bind; it doesn't
+        # mean the bind succeeded (a busy port fails right after that line).
+        # Trusting the log alone previously caused a false "Registered with
+        # coordinator" for a server that then crashed on bind.
+        port  <- isolate(rv$port)
+        token <- if (!is.null(isolate(rv$config))) isolate(rv$config)$token else ""
+        healthy <- !is.na(port) && tryCatch({
+          hdrs <- if (nzchar(token))
+            httr::add_headers(Authorization = paste("Bearer", token)) else NULL
+          r <- httr::GET(sprintf("http://127.0.0.1:%d/health", port), hdrs, httr::timeout(1))
+          httr::status_code(r) == 200L
+        }, error = function(e) FALSE)
+
+        if (healthy) {
+          rv$status <- "running"
+          # Auto-register once the server is confirmed up, if we joined via an invite.
+          if (isolate(rv$need_register) && !is.null(isolate(rv$config))) {
+            msg <- .do_register(isolate(rv$config), port, isolate(rv$ts_ip))
+            rv$join_status <- msg
+            rv$log <- c(rv$log, paste0("\n--- ", msg, " ---"))
+            rv$need_register <- FALSE
+          }
         }
       }
     } else {
@@ -348,7 +372,6 @@ server <- function(input, output, session) {
     .save_config(cfg)
     rv$config <- cfg
 
-    updateTextInput(session, "token", value = cfg$token)
     updateTextAreaInput(session, "invite", value = "")
     rv$join_status <- "Joined. Select your data file (if needed) and click Start Server."
     showNotification(paste0("Joined study '", cfg$study,
@@ -369,7 +392,7 @@ server <- function(input, output, session) {
   # ---- Address display (only shown while running) ----------------
   output$address_ui <- renderUI({
     if (rv$status == "stopped") return(NULL)
-    port <- isolate(input$port)
+    port <- isolate(rv$port)
     if (nzchar(rv$ts_ip)) {
       div(class = "addr",
           div(class = "addr-lbl", "Your address (the coordinator reaches you here)"),
@@ -421,6 +444,10 @@ server <- function(input, output, session) {
       showNotification("fedstats package not installed",
                        type = "error"); return()
     }
+    if (is.null(rv$config)) {
+      showNotification("Join a study first (paste your invite above).",
+                       type = "warning"); return()
+    }
 
     data_path <- if (length(.csv_files) > 0) {
       input$data_file
@@ -434,19 +461,22 @@ server <- function(input, output, session) {
                        type = "error"); return()
     }
 
-    port  <- as.integer(input$port)
-    token <- trimws(input$token)
+    port <- .find_free_port()
+    if (is.na(port)) {
+      showNotification("No free port found — close other programs and try again.",
+                       type = "error"); return()
+    }
+    rv$port <- port
+    token   <- rv$config$token
 
     env_vars                  <- Sys.getenv()
     env_vars["FED_DATA_FILE"] <- data_path
     env_vars["FED_PORT"]      <- as.character(port)
-    if (nzchar(token)) env_vars["FED_TOKEN"] <- token
+    env_vars["FED_TOKEN"]     <- token
 
     rv$log    <- character(0)
     rv$status <- "starting"
-    # If we joined via an invite, register once the server is up.
-    rv$need_register <- !is.null(rv$config) &&
-                        identical(token, rv$config$token)
+    rv$need_register <- TRUE  # joining via invite is now required to reach here
 
     rv$proc <- tryCatch(
       processx::process$new(
