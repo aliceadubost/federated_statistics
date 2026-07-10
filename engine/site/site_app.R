@@ -178,6 +178,12 @@ ui <- fluidPage(
     .btn, button.btn { border-radius:9px; font-weight:600; padding:9px 20px;
                        font-size:1rem; transition:all .15s ease; }
     .btn-sm { padding:8px 18px; font-size:.92rem; }
+    /* fileInput's Browse… button sits in a Bootstrap input-group next to
+       the placeholder text box, which keeps its default (smaller) height
+       — the bigger padding above made Browse taller than its pair. */
+    .btn-file { padding:6px 14px !important; font-size:.92rem !important;
+               border-radius:9px 0 0 9px !important; }
+    .input-group .form-control { border-radius:0 9px 9px 0; }
     .btn-primary,
     .btn-primary:active,
     .btn-primary.active { background-color: var(--brand) !important;
@@ -481,7 +487,7 @@ server <- function(input, output, session) {
         selectInput("data_file", NULL, choices = setNames(files, basename(files)))
       } else {
         div(class = "note", style = "margin-top:2px; margin-bottom:8px;",
-            sprintf("Nothing in %s yet — that's fine, just browse below.", .data_dir))
+            "No files here yet — browse below to pick one, or drop CSVs in the data folder for quick access next time.")
       },
       div(style = "margin-top:6px;",
           fileInput("data_file_upload", "Or choose a file from anywhere",
