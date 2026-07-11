@@ -566,6 +566,13 @@ ui <- fluidPage(
     .nav-tabs > li.active > a:hover,
     .nav-tabs > li.active > a:focus { color:var(--brand); background:transparent !important;
                                       border:none !important; box-shadow:inset 0 -3px 0 var(--brand); }
+    /* ── Persistent privacy-suppression banner (results view) ─────── */
+    .privacy-banner { background:var(--warn-bg); color:var(--warn-fg);
+                      border:1px solid var(--warn-line); border-radius:10px;
+                      padding:14px 16px; margin-bottom:12px; font-size:.9rem; line-height:1.5; }
+    .privacy-banner ul { margin:8px 0 0; padding-left:20px; }
+    .privacy-banner li { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+                         font-size:.82rem; margin:2px 0; }
   "))),
 
   tags$script(HTML("
@@ -1161,7 +1168,22 @@ server <- function(input, output, session) {
     if (!have_results) return(tabs)
     has_table <- !is.null(rv$outputs) &&
       any(vapply(rv$outputs, function(o) identical(o$type, "table"), logical(1)))
+
+    # Persistent privacy banner: stays visible above the results the whole
+    # time they're shown (not just a dismissable toast at run time), so the
+    # fact that small subgroups were withheld can't be missed or forgotten —
+    # matching the notice embedded in every exported file.
+    priv_msgs <- grep("Privacy suppression", rv$run_warnings, value = TRUE)
+    privacy_banner <- if (length(priv_msgs) > 0)
+      div(class = "privacy-banner",
+          strong("Privacy protection applied. "),
+          "Small subgroups (fewer patients than the site privacy threshold) were ",
+          "withheld to protect individual patients; affected pooled figures exclude ",
+          "the withheld site(s).",
+          tags$ul(lapply(priv_msgs, tags$li)))
+
     tagList(
+      privacy_banner,
       div(style = "display:flex; justify-content:flex-end; gap:8px; margin-bottom:10px;",
           if (has_table)
             downloadButton("download_csv", "CSV", class = "btn-default btn-sm"),
