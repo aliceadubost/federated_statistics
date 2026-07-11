@@ -80,6 +80,7 @@ pr$handle("GET", "/ping", function(req, res) {
 # Only what a site actually needs — never engine/coordinator/, analysis/
 # templates, or the design/testing docs.
 KIT_FILES <- c(
+  "Run/SITE_QUICKSTART.md",
   "Run/Windows/Start Site.bat", "Run/Mac/Start Site.command", "Run/Linux/Start Site.sh",
   "engine/site/site_app.R", "engine/site/api_server.R", "engine/setup.R",
   file.path("fedstats", list.files(file.path(PROJECT_ROOT, "fedstats"), recursive = TRUE))
