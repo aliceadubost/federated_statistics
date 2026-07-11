@@ -249,6 +249,137 @@ build_readiness_note <- function(step_script, n_sites) {
 }
 
 # ---------------------------------------------------------------
+# Saving results: build a single self-contained HTML report bundling
+# every output (tables, plots, text) so the coordinator can keep, print
+# (to PDF), or share the results. No external files, no dependencies
+# beyond what's already loaded (jsonlite for base64). Pure functions so
+# they're testable without a Shiny session.
+# ---------------------------------------------------------------
+.html_escape <- function(x) {
+  x <- as.character(x)
+  x <- gsub("&", "&amp;", x, fixed = TRUE)
+  x <- gsub("<", "&lt;",  x, fixed = TRUE)
+  gsub(">", "&gt;", x, fixed = TRUE)
+}
+
+.df_to_html <- function(df) {
+  df <- as.data.frame(df, stringsAsFactors = FALSE)
+  th <- paste0("<th>", vapply(names(df), .html_escape, character(1)), "</th>", collapse = "")
+  cells <- lapply(df, function(col) vapply(col, function(v) .html_escape(as.character(v)), character(1)))
+  body <- if (nrow(df) == 0) "" else paste(vapply(seq_len(nrow(df)), function(i) {
+    tds <- paste0("<td>", vapply(cells, `[`, character(1), i), "</td>", collapse = "")
+    paste0("<tr>", tds, "</tr>")
+  }, character(1)), collapse = "\n")
+  paste0("<table class='rt'><thead><tr>", th, "</tr></thead><tbody>", body, "</tbody></table>")
+}
+
+# Render a plot output (a zero-arg function or a ggplot) to a base64 PNG
+# data URI so it embeds directly in the standalone HTML file.
+.plot_to_data_uri <- function(fn, width = 900, height = 520, res = 110) {
+  tmp <- tempfile(fileext = ".png")
+  grDevices::png(tmp, width = width, height = height, res = res)
+  on.exit(grDevices::dev.off(), add = TRUE)
+  tryCatch({
+    if (is.function(fn)) fn()
+    else if (inherits(fn, "ggplot")) print(fn)
+    else { graphics::plot.new(); graphics::text(0.5, 0.5, "Cannot render plot.") }
+  }, error = function(e) {
+    graphics::plot.new(); graphics::text(0.5, 0.5, paste("Plot error:", conditionMessage(e)))
+  })
+  grDevices::dev.off(); on.exit()
+  raw <- readBin(tmp, "raw", file.info(tmp)$size)
+  unlink(tmp)
+  paste0("data:image/png;base64,", gsub("[[:space:]]", "", jsonlite::base64_enc(raw)))
+}
+
+# Assemble the full report. `outputs` is get_outputs()-shaped; `warnings`
+# are the run's captured warnings (privacy suppression etc.).
+build_results_html <- function(title, outputs = NULL, val_txt = NULL,
+                               console_log = NULL, warnings = character(0),
+                               n_sites = NA_integer_, now = Sys.time()) {
+  esc  <- .html_escape
+  ttl  <- if (is.null(title) || !nzchar(title)) "Federated Analysis" else title
+  when <- format(now, "%Y-%m-%d %H:%M")
+
+  meta_bits <- c(
+    if (!is.na(n_sites)) sprintf("%d site%s", n_sites, if (n_sites == 1) "" else "s"),
+    paste("generated", when)
+  )
+
+  sections <- character(0)
+
+  priv <- grep("Privacy suppression", warnings, value = TRUE)
+  if (length(priv) > 0)
+    sections <- c(sections, paste0(
+      "<div class='note privacy'><b>Privacy protection applied.</b> ",
+      "One or more small subgroups were withheld to protect individual patients. ",
+      "Affected pooled figures exclude the withheld site(s).<ul>",
+      paste0("<li>", esc(priv), "</li>", collapse = ""), "</ul></div>"))
+
+  if (!is.null(outputs)) for (out in outputs) {
+    inner <- switch(out$type,
+      "table" = .df_to_html(out$value),
+      "plot"  = sprintf("<img alt='%s' src='%s'>", esc(out$name), .plot_to_data_uri(out$value)),
+      "text"  = paste0("<pre>", esc(if (is.character(out$value)) out$value
+                                    else paste(utils::capture.output(print(out$value)), collapse = "\n")),
+                       "</pre>"),
+      paste0("<pre>", esc("(unsupported output type)"), "</pre>"))
+    cap <- if (!is.null(out$caption)) paste0("<div class='cap'>", esc(out$caption), "</div>") else ""
+    sections <- c(sections, sprintf("<section><h2>%s</h2>%s%s</section>",
+                                    esc(out$name), inner, cap))
+  }
+
+  if (!is.null(val_txt) && nzchar(val_txt))
+    sections <- c(sections, sprintf("<section><h2>Validation report</h2><pre>%s</pre></section>",
+                                    esc(val_txt)))
+
+  if (!is.null(console_log) && nzchar(console_log))
+    sections <- c(sections, sprintf("<section><h2>Console log</h2><pre>%s</pre></section>",
+                                    esc(console_log)))
+
+  if (length(sections) == 0)
+    sections <- "<section><p class='note'>No results were produced.</p></section>"
+
+  paste0(
+"<!doctype html><html lang='en'><head><meta charset='utf-8'>",
+"<meta name='viewport' content='width=device-width, initial-scale=1'>",
+"<title>", esc(ttl), " — Results</title><style>",
+":root{--brand:#2454E8;--ink:#0F1B2D;--muted:#5B6B82;--line:#DCE3EE;--tint:#F3F6FB;}",
+"*{box-sizing:border-box;}",
+"body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;",
+"color:var(--ink);max-width:900px;margin:0 auto;padding:40px 28px 64px;line-height:1.6;background:#fff;}",
+"header{border-bottom:2px solid var(--line);padding-bottom:16px;margin-bottom:8px;}",
+"h1{font-size:1.7rem;font-weight:800;letter-spacing:-.02em;margin:0 0 4px;}",
+".sub{color:var(--muted);font-size:.9rem;}",
+"section{margin-top:34px;}",
+"h2{font-size:1.15rem;font-weight:700;color:var(--ink);border-bottom:1px solid var(--line);",
+"padding-bottom:8px;margin-bottom:14px;}",
+"table.rt{border-collapse:collapse;width:100%;font-size:.92rem;}",
+"table.rt th{text-align:left;color:var(--muted);font-size:.8rem;text-transform:uppercase;",
+"letter-spacing:.04em;border-bottom:2px solid var(--line);padding:8px 10px;}",
+"table.rt td{padding:8px 10px;border-bottom:1px solid var(--line);}",
+"table.rt tbody tr:nth-child(even){background:var(--tint);}",
+"img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px;}",
+"pre{background:var(--tint);border:1px solid var(--line);border-radius:8px;padding:14px 16px;",
+"white-space:pre-wrap;font-size:.86rem;overflow-x:auto;}",
+".cap{color:var(--muted);font-size:.85rem;font-style:italic;margin-top:8px;}",
+".note{color:var(--muted);font-size:.9rem;}",
+".privacy{background:#FDF1E4;border:1px solid #F6DDBC;color:#9A5B0A;border-radius:10px;",
+"padding:14px 16px;margin-top:24px;}",
+".privacy ul{margin:8px 0 0;padding-left:20px;}",
+"footer{margin-top:48px;padding-top:16px;border-top:1px solid var(--line);color:var(--muted);",
+"font-size:.8rem;}",
+"@media print{body{max-width:none;}section{break-inside:avoid;}}",
+"</style></head><body>",
+"<header><h1>", esc(ttl), "</h1>",
+"<div class='sub'>Federated Statistics — ", esc(paste(meta_bits, collapse = " · ")), "</div></header>",
+paste(sections, collapse = "\n"),
+"<footer>Only aggregate statistics leave each site; no individual patient data is transferred. ",
+"Cells below the site privacy threshold are withheld.</footer>",
+"</body></html>")
+}
+
+# ---------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------
 ui <- fluidPage(
@@ -440,6 +571,7 @@ server <- function(input, output, session) {
     outputs     = NULL,   # list of register_output() entries
     val_txt     = NULL,   # text from standalone Validate
     console_log = NULL,   # captured cat()/print() output from analysis script
+    run_warnings = character(0),  # warnings captured during the last run (privacy etc.)
     reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
     ping_status = list(),  # url -> list(ok, checked_at) from the last ping
     pending_revoke_sid = NULL, # sid awaiting confirm in the Revoke dialog
@@ -501,9 +633,10 @@ server <- function(input, output, session) {
         showNotification(paste("Could not read script:", e$message),
                          type = "error"); NULL
       })
-    rv$outputs     <- NULL
-    rv$val_txt     <- NULL
-    rv$console_log <- NULL
+    rv$outputs      <- NULL
+    rv$val_txt      <- NULL
+    rv$console_log  <- NULL
+    rv$run_warnings <- character(0)
   })
 
   output$script_meta_ui <- renderUI({
@@ -851,7 +984,8 @@ server <- function(input, output, session) {
       log_parts <- captured
       if (length(warn_msgs))
         log_parts <- c(log_parts, "", "──────── Warnings ────────", warn_msgs)
-      rv$console_log <- if (length(log_parts)) paste(log_parts, collapse = "\n") else ""
+      rv$console_log  <- if (length(log_parts)) paste(log_parts, collapse = "\n") else ""
+      rv$run_warnings <- warn_msgs
 
       incProgress(1, detail = "Done")
     })
@@ -941,7 +1075,19 @@ server <- function(input, output, session) {
       )
     }
 
-    do.call(tabsetPanel, c(list(id = "dyn_tabs"), all_tabs))
+    tabs <- do.call(tabsetPanel, c(list(id = "dyn_tabs"), all_tabs))
+
+    # Save-results bar: a single self-contained HTML report (all tables,
+    # plots and text) the coordinator can keep, print to PDF, or share.
+    # Shown whenever there is something to save.
+    have_results <- !is.null(rv$outputs) || !is.null(rv$val_txt)
+    if (!have_results) return(tabs)
+    tagList(
+      div(style = "display:flex; justify-content:flex-end; margin-bottom:10px;",
+          downloadButton("download_report", "Save results",
+                         class = "btn-primary btn-sm")),
+      tabs
+    )
   })
 
   # val_display is always registered; shown inside the Status tab
@@ -954,6 +1100,27 @@ server <- function(input, output, session) {
     log <- rv$console_log
     if (is.null(log) || !nzchar(log)) "(no printed output)" else log
   })
+
+  # ---- Save results: one self-contained HTML report ---------------
+  output$download_report <- downloadHandler(
+    filename = function() {
+      ttl  <- if (!is.null(rv$meta)) rv$meta$title else "federated-analysis"
+      slug <- gsub("(^-|-$)", "", gsub("[^A-Za-z0-9]+", "-", trimws(ttl)))
+      sprintf("%s_%s.html", if (nzchar(slug)) slug else "results",
+              format(Sys.time(), "%Y-%m-%d_%H%M"))
+    },
+    content = function(file) {
+      html <- build_results_html(
+        title       = if (!is.null(rv$meta)) rv$meta$title else NULL,
+        outputs     = rv$outputs,
+        val_txt     = rv$val_txt,
+        console_log = rv$console_log,
+        warnings    = rv$run_warnings,
+        n_sites     = length(active_sites())
+      )
+      writeLines(html, file, useBytes = TRUE)
+    }
+  )
 
   # ---- Register a renderer for every dynamic output ---------------
   observeEvent(rv$outputs, {
