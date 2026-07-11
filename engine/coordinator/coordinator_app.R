@@ -108,6 +108,24 @@ onStop(function() {
   )
 }
 
+# Bundled analyses (analysis/templates/*.R), listed by their human title so
+# the coordinator can pick one from a dropdown instead of hunting for an .R
+# file. Returns a named character vector value=path, name=title (empty if the
+# folder isn't found — the Browse fallback still works).
+TEMPLATES_DIR <- normalizePath(file.path(APP_DIR, "..", "..", "analysis", "templates"),
+                               mustWork = FALSE)
+.scan_templates <- function() {
+  if (!dir.exists(TEMPLATES_DIR)) return(character(0))
+  files <- sort(list.files(TEMPLATES_DIR, pattern = "\\.R$", full.names = TRUE))
+  if (!length(files)) return(character(0))
+  titles <- vapply(files, function(f)
+    tryCatch(.extract_meta(f)$title,
+             error = function(e) tools::file_path_sans_ext(basename(f))),
+    character(1))
+  setNames(files, titles)
+}
+ANALYSIS_TEMPLATES <- .scan_templates()
+
 # ---------------------------------------------------------------
 # Utilities
 # ---------------------------------------------------------------
@@ -241,7 +259,7 @@ invite_expiry_label <- function(exp, invite_state, now = as.integer(Sys.time()))
 # Script-then-Sites order that was never actually enforced.
 build_readiness_note <- function(step_script, n_sites) {
   missing <- c(
-    if (!step_script) "load an analysis script",
+    if (!step_script) "choose an analysis",
     if (n_sites == 0) "invite at least one site"
   )
   if (length(missing) == 0) return("Ready — click Validate or Run when you are.")
@@ -601,10 +619,15 @@ ui <- fluidPage(
 
       hr(),
 
-      # ---- Analysis script (no required order relative to Sites below —
-      # invite people whenever, load/swap scripts whenever) ----
-      div(class = "step", "Analysis script"),
-      fileInput("script_file", NULL, accept = ".R",
+      # ---- Analysis (no required order relative to Sites below — invite
+      # people whenever, load/swap analyses whenever). A dropdown of the
+      # bundled analyses plus a Browse for your own — both always available,
+      # like the site's data-file picker, so neither is an "error path". ----
+      div(class = "step", "Analysis"),
+      if (length(ANALYSIS_TEMPLATES) > 0)
+        selectInput("script_choice", NULL, width = "100%",
+                    choices = c("Choose an analysis…" = "", ANALYSIS_TEMPLATES)),
+      fileInput("script_file", "Or load your own script", accept = ".R",
                 buttonLabel = "Browse…", placeholder = "No script selected"),
       uiOutput("script_meta_ui"),
 
@@ -630,12 +653,19 @@ ui <- fluidPage(
       actionButton("btn_run",      "Run analysis",
                    class = "btn-success btn-block"),
 
+      div(class = "note", style = "margin-top:8px;",
+          strong("Ping"), " checks the sites answer. ",
+          strong("Validate"), " checks each site's data is ready. ",
+          strong("Run"), " computes the results."),
+
       hr(),
       verbatimTextOutput("ping_out"),
 
       div(class = "note",
           "Only aggregate statistics leave each site.",
-          br(), "No individual patient data is transferred.")
+          br(), "No individual patient data is transferred.",
+          br(),
+          actionLink("show_help", "How this works", style = "font-size:.85rem;"))
     ),
 
     mainPanel(
@@ -652,6 +682,7 @@ server <- function(input, output, session) {
 
   rv <- reactiveValues(
     meta        = NULL,   # list(title, vars_spec)
+    script_path = NULL,   # path Run sources (bundled template or uploaded file)
     outputs     = NULL,   # list of register_output() entries
     val_txt     = NULL,   # text from standalone Validate
     console_log = NULL,   # captured cat()/print() output from analysis script
@@ -708,19 +739,50 @@ server <- function(input, output, session) {
     titlePanel(title)
   })
 
-  # ---- Load script: extract metadata ----------------------------
-  observeEvent(input$script_file, {
-    req(input$script_file)
-    rv$meta    <- tryCatch(
-      .extract_meta(input$script_file$datapath),
+  # ---- Load an analysis: extract metadata (shared by both pickers) ----
+  # rv$script_path is the file the Run button actually sources — set to a
+  # bundled template (dropdown) or an uploaded file (Browse), whichever the
+  # operator touched last.
+  load_analysis <- function(path) {
+    rv$script_path <- path
+    rv$meta <- tryCatch(
+      .extract_meta(path),
       error = function(e) {
-        showNotification(paste("Could not read script:", e$message),
+        showNotification(paste("Could not read analysis:", conditionMessage(e)),
                          type = "error"); NULL
       })
     rv$outputs      <- NULL
     rv$val_txt      <- NULL
     rv$console_log  <- NULL
     rv$run_warnings <- character(0)
+  }
+
+  observeEvent(input$script_file, {           # Browse: your own script
+    req(input$script_file)
+    load_analysis(input$script_file$datapath)
+  })
+
+  observeEvent(input$script_choice, {         # Dropdown: a bundled analysis
+    if (nzchar(input$script_choice)) load_analysis(input$script_choice)
+  }, ignoreInit = TRUE)
+
+  # ---- "How this works" help modal ------------------------------
+  observeEvent(input$show_help, {
+    showModal(modalDialog(
+      title = "How this works",
+      tags$ol(
+        tags$li(strong("Name your study"), " and ", strong("choose an analysis"),
+                " (a built-in one, or load your own script)."),
+        tags$li(strong("Invite each hospital site."), " Send them the invite link; ",
+                "they join and start their own server on their machine."),
+        tags$li(strong("Ping"), " to check they answer, ", strong("Validate"),
+                " to check their data is ready, then ", strong("Run"),
+                " to compute the pooled results."),
+        tags$li(strong("Save the results"), " as Excel, CSV, or an HTML report.")),
+      p(class = "note",
+        "Only aggregate statistics ever leave each hospital — no patient records are ",
+        "transferred, and subgroups too small to be safe are withheld automatically."),
+      easyClose = TRUE, footer = modalButton("Got it")))
   })
 
   output$script_meta_ui <- renderUI({
@@ -1031,11 +1093,11 @@ server <- function(input, output, session) {
     if (!length(sites)) {
       showNotification("No sites yet. Invite or add a site first.", type = "warning"); return()
     }
-    if (is.null(rv$meta)) {
-      showNotification("Load an analysis script first.", type = "warning"); return()
+    if (is.null(rv$meta) || is.null(rv$script_path)) {
+      showNotification("Choose an analysis first.", type = "warning"); return()
     }
     ss     <- lapply(sites, function(s) create_remote_server(s$url, s$token))
-    script <- input$script_file$datapath
+    script <- rv$script_path
 
     # capture.output() only grabs printed output; warnings go to stderr and
     # would be lost. Collect them via a calling handler so privacy-suppression
