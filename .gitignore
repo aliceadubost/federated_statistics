@@ -1,6 +1,7 @@
 # Phase 2 secrets - never upload (contain tokens / private keys)
 engine/coordinator/registered_sites.json
 engine/coordinator/coordinator_key.json
+engine/coordinator/study_log.jsonl
 engine/site/site_config.json
 *.lock
 

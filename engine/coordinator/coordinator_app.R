@@ -44,6 +44,7 @@ APP_DIR          <- getwd()
 REG_FILE         <- normalizePath(file.path(APP_DIR, "registered_sites.json"),
                                   mustWork = FALSE)
 KEY_FILE         <- file.path(APP_DIR, "coordinator_key.json")
+STUDY_LOG        <- file.path(APP_DIR, "study_log.jsonl")  # append-only run history
 REGISTRAR_SCRIPT <- file.path(APP_DIR, "registrar.R")
 REGISTRAR_PORT   <- as.integer(Sys.getenv("FED_REGISTRAR_PORT", "8731"))
 INVITE_TTL_DAYS  <- as.integer(Sys.getenv("FED_INVITE_TTL_DAYS", "7"))
@@ -125,6 +126,17 @@ TEMPLATES_DIR <- normalizePath(file.path(APP_DIR, "..", "..", "analysis", "templ
   setNames(files, titles)
 }
 ANALYSIS_TEMPLATES <- .scan_templates()
+
+# Append one run to the persistent study log (JSON Lines) — a durable record
+# of what was run, on which sites, when, and whether privacy suppression
+# fired. Survives app restarts, for reproducibility and a paper's methods
+# section. Best-effort: a logging failure never blocks the analysis.
+.append_study_log <- function(record, path = STUDY_LOG) {
+  tryCatch({
+    line <- jsonlite::toJSON(record, auto_unbox = TRUE, null = "null")
+    cat(line, "\n", file = path, append = TRUE, sep = "")
+  }, error = function(e) NULL)
+}
 
 # ---------------------------------------------------------------
 # Utilities
@@ -311,20 +323,37 @@ build_readiness_note <- function(step_script, n_sites) {
 }
 
 # Assemble the full report. `outputs` is get_outputs()-shaped; `warnings`
-# are the run's captured warnings (privacy suppression etc.).
+# are the run's captured warnings (privacy suppression etc.). `study` is the
+# study name and `sites` the participating site names — recorded for
+# provenance (a shared/archived result says what was run, on whom, when).
 build_results_html <- function(title, outputs = NULL, val_txt = NULL,
                                console_log = NULL, warnings = character(0),
-                               n_sites = NA_integer_, now = Sys.time()) {
-  esc  <- .html_escape
-  ttl  <- if (is.null(title) || !nzchar(title)) "Federated Analysis" else title
-  when <- format(now, "%Y-%m-%d %H:%M")
+                               n_sites = NA_integer_, now = Sys.time(),
+                               study = NULL, sites = character(0)) {
+  esc     <- .html_escape
+  analysis <- if (is.null(title) || !nzchar(title)) "Federated Analysis" else title
+  headline <- if (!is.null(study) && nzchar(study)) study else analysis
+  when     <- format(now, "%Y-%m-%d %H:%M")
+  ttl      <- headline
 
+  n_sites <- if (length(sites) > 0) length(sites) else n_sites
   meta_bits <- c(
+    if (!is.null(study) && nzchar(study)) paste("Analysis:", analysis),
     if (!is.na(n_sites)) sprintf("%d site%s", n_sites, if (n_sites == 1) "" else "s"),
     paste("generated", when)
   )
 
   sections <- character(0)
+
+  # Provenance block: exactly what was run, on which sites, when.
+  if (length(sites) > 0)
+    sections <- c(sections, paste0(
+      "<section><h2>Provenance</h2><table class='rt'><tbody>",
+      "<tr><th>Study</th><td>", esc(if (!is.null(study) && nzchar(study)) study else "—"), "</td></tr>",
+      "<tr><th>Analysis</th><td>", esc(analysis), "</td></tr>",
+      "<tr><th>Generated</th><td>", esc(when), "</td></tr>",
+      "<tr><th>Participating sites</th><td>", esc(paste(sites, collapse = ", ")), "</td></tr>",
+      "</tbody></table></section>"))
 
   priv <- grep("Privacy suppression", warnings, value = TRUE)
   if (length(priv) > 0)
@@ -404,14 +433,19 @@ paste(sections, collapse = "\n"),
 # stay in the HTML report. Returns a named list of data.frames for
 # writexl::write_xlsx(). Pure / testable.
 # ---------------------------------------------------------------
-# A small key/value data.frame describing the run — shared by the Excel
-# "Study info" sheet and the CSV bundle's study_info.csv.
-.results_info_df <- function(title, n_sites, warnings, now) {
+# A small key/value data.frame describing the run (provenance) — shared by
+# the Excel "Study info" sheet and the CSV bundle's study_info.csv.
+.results_info_df <- function(analysis, n_sites, warnings, now,
+                             study = NULL, sites = character(0)) {
   priv <- grep("Privacy suppression", warnings, value = TRUE)
+  n <- if (length(sites) > 0) length(sites) else n_sites
   data.frame(
-    Field = c("Study", "Sites", "Generated", if (length(priv)) "Privacy note"),
-    Value = c(if (is.null(title) || !nzchar(title)) "Federated Analysis" else title,
-              if (is.na(n_sites)) "" else as.character(n_sites),
+    Field = c("Study", "Analysis", "Sites", "Site names", "Generated",
+              if (length(priv)) "Privacy note"),
+    Value = c(if (!is.null(study) && nzchar(study)) study else "—",
+              if (is.null(analysis) || !nzchar(analysis)) "Federated Analysis" else analysis,
+              if (is.na(n)) "" else as.character(n),
+              if (length(sites) > 0) paste(sites, collapse = ", ") else "—",
               format(now, "%Y-%m-%d %H:%M"),
               if (length(priv)) paste(priv, collapse = " | ")),
     stringsAsFactors = FALSE)
@@ -445,13 +479,14 @@ paste(sections, collapse = "\n"),
 
 build_results_workbook <- function(outputs = NULL, title = NULL, val_txt = NULL,
                                     warnings = character(0), n_sites = NA_integer_,
-                                    now = Sys.time()) {
+                                    now = Sys.time(), study = NULL,
+                                    sites = character(0)) {
   sheets <- list(); used <- character(0)
   add <- function(nm, df) {
     s <- .xlsx_sheet_name(nm, used); used <<- c(used, s); sheets[[s]] <<- df
   }
 
-  add("Study info", .results_info_df(title, n_sites, warnings, now))
+  add("Study info", .results_info_df(title, n_sites, warnings, now, study, sites))
 
   notes <- list()
   if (!is.null(outputs)) for (out in outputs) {
@@ -730,6 +765,13 @@ server <- function(input, output, session) {
       }
     }
     sites
+  })
+
+  # Names of the sites that will take part in an analysis (for provenance).
+  .site_names <- reactive({
+    vapply(active_sites(),
+           function(s) if (is.null(s$name) || !nzchar(s$name)) "(unnamed)" else s$name,
+           character(1))
   })
 
   # ---- Dynamic app title from script ----------------------------
@@ -1157,6 +1199,17 @@ server <- function(input, output, session) {
       showNotification(
         sprintf("Done — %d output(s) ready.", length(result)),
         type = "message")
+
+      # Provenance: record what was run, on whom, when — persistently.
+      .append_study_log(list(
+        time        = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+        study       = trimws(input$study_name),
+        analysis    = rv$meta$title,
+        sites       = as.list(.site_names()),
+        n_sites     = length(sites),
+        suppression = any(grepl("Privacy suppression", warn_msgs)),
+        outputs     = as.list(vapply(result, function(o) o$name, character(1)))
+      ))
     }
   })
 
@@ -1283,7 +1336,8 @@ server <- function(input, output, session) {
         val_txt     = rv$val_txt,
         console_log = rv$console_log,
         warnings    = rv$run_warnings,
-        n_sites     = length(active_sites())
+        study       = trimws(input$study_name),
+        sites       = .site_names()
       )
       writeLines(html, file, useBytes = TRUE)
     }
@@ -1305,7 +1359,8 @@ server <- function(input, output, session) {
         title    = if (!is.null(rv$meta)) rv$meta$title else NULL,
         val_txt  = rv$val_txt,
         warnings = rv$run_warnings,
-        n_sites  = length(active_sites())
+        study    = trimws(input$study_name),
+        sites    = .site_names()
       )
       writexl::write_xlsx(wb, path = file)
     }
@@ -1347,7 +1402,8 @@ server <- function(input, output, session) {
       }
       utils::write.csv(
         .results_info_df(if (!is.null(rv$meta)) rv$meta$title else NULL,
-                         length(active_sites()), rv$run_warnings, Sys.time()),
+                         length(active_sites()), rv$run_warnings, Sys.time(),
+                         study = trimws(input$study_name), sites = .site_names()),
         file.path(td, "study_info.csv"), row.names = FALSE, fileEncoding = "UTF-8")
       zip::zip(zipfile = file, files = list.files(td), root = td)
     }
