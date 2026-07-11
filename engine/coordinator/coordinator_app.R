@@ -844,8 +844,13 @@ server <- function(input, output, session) {
     poll()
     alive <- !is.null(registrar_proc) && registrar_proc$is_alive()
     if (!alive)
-      return(div(class = "sbadge sb-warn", style = "margin-bottom:4px;",
-                 "Registrar not running"))
+      return(div(
+        div(class = "sbadge sb-warn", style = "margin-bottom:6px;",
+            "Registrar not running"),
+        div(class = "note", style = "margin-bottom:6px;",
+            "Sites can't join or register until this is running."),
+        actionButton("btn_restart_registrar", "Restart registrar",
+                     class = "btn-primary btn-sm")))
     tagList(
       if (nzchar(COORD_ADDR))
         div(class = "coord-addr", title = "Sites register here automatically",
@@ -856,6 +861,20 @@ server <- function(input, output, session) {
       div(class = "fp", title = "Read this to a site operator to verify your key",
           paste0("Key fingerprint: ", COORD_FP))
     )
+  })
+
+  # ---- Restart the registrar subprocess (if it died) ------------
+  # registrar_proc is the app-level binding; <<- reassigns it so the status
+  # poll picks up the new process. Avoids restarting the whole app.
+  observeEvent(input$btn_restart_registrar, {
+    try(if (!is.null(registrar_proc) && registrar_proc$is_alive())
+          registrar_proc$kill(), silent = TRUE)
+    registrar_proc <<- tryCatch(.start_registrar(), error = function(e) NULL)
+    if (!is.null(registrar_proc))
+      showNotification("Registrar restarted.", type = "message")
+    else
+      showNotification("Could not restart the registrar — check the launcher console.",
+                       type = "error", duration = 10)
   })
 
   # ---- Sites table ----------------------------------------------
