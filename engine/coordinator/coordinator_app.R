@@ -386,6 +386,19 @@ paste(sections, collapse = "\n"),
 # stay in the HTML report. Returns a named list of data.frames for
 # writexl::write_xlsx(). Pure / testable.
 # ---------------------------------------------------------------
+# A small key/value data.frame describing the run — shared by the Excel
+# "Study info" sheet and the CSV bundle's study_info.csv.
+.results_info_df <- function(title, n_sites, warnings, now) {
+  priv <- grep("Privacy suppression", warnings, value = TRUE)
+  data.frame(
+    Field = c("Study", "Sites", "Generated", if (length(priv)) "Privacy note"),
+    Value = c(if (is.null(title) || !nzchar(title)) "Federated Analysis" else title,
+              if (is.na(n_sites)) "" else as.character(n_sites),
+              format(now, "%Y-%m-%d %H:%M"),
+              if (length(priv)) paste(priv, collapse = " | ")),
+    stringsAsFactors = FALSE)
+}
+
 # Excel sheet names: <=31 chars, none of []:*?/\, and unique in the book.
 .xlsx_sheet_name <- function(name, used) {
   s <- gsub("[][:*?/\\\\]", " ", name, perl = TRUE)
@@ -400,6 +413,18 @@ paste(sections, collapse = "\n"),
   s
 }
 
+# Filesystem-safe name for one CSV in the bundle: strip \/:*?"<>|, cap
+# length, keep unique.
+.safe_filename <- function(name, ext, used) {
+  s <- gsub("[\\\\/:*?\"<>|]", " ", name)
+  s <- gsub("\\s+", "_", trimws(gsub("[[:cntrl:]]", " ", s)))
+  if (!nzchar(s)) s <- "table"
+  s <- substr(s, 1L, 60L)
+  fn <- paste0(s, ext); base <- s; k <- 1L
+  while (fn %in% used) { fn <- paste0(base, "_", k, ext); k <- k + 1L }
+  fn
+}
+
 build_results_workbook <- function(outputs = NULL, title = NULL, val_txt = NULL,
                                     warnings = character(0), n_sites = NA_integer_,
                                     now = Sys.time()) {
@@ -408,16 +433,7 @@ build_results_workbook <- function(outputs = NULL, title = NULL, val_txt = NULL,
     s <- .xlsx_sheet_name(nm, used); used <<- c(used, s); sheets[[s]] <<- df
   }
 
-  priv <- grep("Privacy suppression", warnings, value = TRUE)
-  info <- data.frame(
-    Field = c("Study", "Sites", "Generated",
-              if (length(priv)) "Privacy note"),
-    Value = c(if (is.null(title) || !nzchar(title)) "Federated Analysis" else title,
-              if (is.na(n_sites)) "" else as.character(n_sites),
-              format(now, "%Y-%m-%d %H:%M"),
-              if (length(priv)) paste(priv, collapse = " | ")),
-    stringsAsFactors = FALSE)
-  add("Study info", info)
+  add("Study info", .results_info_df(title, n_sites, warnings, now))
 
   notes <- list()
   if (!is.null(outputs)) for (out in outputs) {
@@ -1148,6 +1164,8 @@ server <- function(input, output, session) {
     tagList(
       div(style = "display:flex; justify-content:flex-end; gap:8px; margin-bottom:10px;",
           if (has_table)
+            downloadButton("download_csv", "CSV", class = "btn-default btn-sm"),
+          if (has_table)
             downloadButton("download_xlsx", "Excel", class = "btn-default btn-sm"),
           downloadButton("download_report", "Report (HTML)",
                          class = "btn-primary btn-sm")),
@@ -1206,6 +1224,48 @@ server <- function(input, output, session) {
         n_sites  = length(active_sites())
       )
       writexl::write_xlsx(wb, path = file)
+    }
+  )
+
+  # ---- Save results: CSV (one table -> .csv; several -> .zip) -----
+  .result_tables <- reactive({
+    if (is.null(rv$outputs)) list()
+    else Filter(function(o) identical(o$type, "table"), rv$outputs)
+  })
+
+  output$download_csv <- downloadHandler(
+    filename = function() {
+      ttl  <- if (!is.null(rv$meta)) rv$meta$title else "federated-analysis"
+      slug <- gsub("(^-|-$)", "", gsub("[^A-Za-z0-9]+", "-", trimws(ttl)))
+      if (!nzchar(slug)) slug <- "results"
+      stamp <- format(Sys.time(), "%Y-%m-%d_%H%M")
+      ext   <- if (length(.result_tables()) <= 1L) "csv" else "zip"
+      sprintf("%s_%s.%s", slug, stamp, ext)
+    },
+    content = function(file) {
+      tabs <- .result_tables()
+      if (length(tabs) == 1L) {
+        # single table: a plain CSV, ready to import anywhere
+        utils::write.csv(as.data.frame(tabs[[1]]$value), file,
+                         row.names = FALSE, fileEncoding = "UTF-8")
+        return(invisible())
+      }
+      # several tables: one CSV each + study_info.csv, bundled into a zip
+      if (!requireNamespace("zip", quietly = TRUE))
+        stop("The 'zip' package is needed to bundle multiple CSVs. Install it with install.packages('zip').")
+      td <- tempfile("csvs"); dir.create(td)
+      on.exit(unlink(td, recursive = TRUE), add = TRUE)
+      used <- character(0)
+      for (o in tabs) {
+        fn <- .safe_filename(o$name, ".csv", used); used <- c(used, fn)
+        utils::write.csv(as.data.frame(o$value), file.path(td, fn),
+                         row.names = FALSE, fileEncoding = "UTF-8")
+      }
+      utils::write.csv(
+        .results_info_df(if (!is.null(rv$meta)) rv$meta$title else NULL,
+                         length(active_sites()), rv$run_warnings, Sys.time()),
+        file.path(td, "study_info.csv"), row.names = FALSE, fileEncoding = "UTF-8")
+      zip::zip(zipfile = file, files = list.files(td), root = td)
     }
   )
 
