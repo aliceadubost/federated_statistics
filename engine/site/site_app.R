@@ -213,7 +213,9 @@ ui <- fluidPage(
 
   div(class = "app-header",
       div(class = "app-dot"),
-      tags$h3("Federated Site", uiOutput("status_badge", inline = TRUE))),
+      tags$h3("Federated Site", uiOutput("status_badge", inline = TRUE)),
+      div(style = "margin-left:auto;",
+          actionLink("show_help_site", "How this works", style = "font-size:.85rem;"))),
 
   uiOutput("warn_ui"),
 
@@ -260,7 +262,8 @@ server <- function(input, output, session) {
     join_status  = NULL,        # text shown under the Join box
     need_register = FALSE,      # register once the server reaches "running"
     ts_ip        = .get_ts_ip(),# live Tailscale IP, refreshed below
-    port         = NA_integer_  # chosen automatically at Start Server time
+    port         = NA_integer_, # chosen automatically at Start Server time
+    data_name    = NA_character_# display name of the file being served
   )
 
   # Re-check Tailscale every few seconds so connecting *after* this app is
@@ -325,18 +328,30 @@ server <- function(input, output, session) {
   })
 
   # ---- Warnings --------------------------------------------------
+  # Surfaced up-front (not only once the server is running) so the operator
+  # can fix them before trying to start. The Tailscale one clears by itself
+  # as soon as Tailscale connects (rv$ts_ip is re-checked every few seconds).
   output$warn_ui <- renderUI({
-    if (!.fedstats_ok)
-      div(class = "warn-box",
-          strong("Setup required"),
-          br(),
-          "The fedstats package is not installed",
-          br(),
-          "Run this in R to fix it",
-          br(),
-          tags$code('devtools::install("fedstats")'),
-          br(),
-          "then restart this window")
+    tagList(
+      if (!.fedstats_ok)
+        div(class = "warn-box",
+            strong("Setup required"),
+            br(),
+            "The fedstats package is not installed",
+            br(),
+            "Run this in R to fix it",
+            br(),
+            tags$code('devtools::install("fedstats")'),
+            br(),
+            "then restart this window"),
+      if (!nzchar(rv$ts_ip))
+        div(class = "warn-box",
+            strong("Tailscale not detected"),
+            br(),
+            "A coordinator on another computer won't be able to reach you until ",
+            "Tailscale is connected. Open Tailscale and sign in — this message ",
+            "clears on its own once you're connected.")
+    )
   })
 
   # ---- Joined-study banner ---------------------------------------
@@ -354,6 +369,25 @@ server <- function(input, output, session) {
   output$join_status_ui <- renderUI({
     if (is.null(rv$join_status)) return(NULL)
     div(class = "join-status", rv$join_status)
+  })
+
+  # ---- "How this works" help modal ------------------------------
+  observeEvent(input$show_help_site, {
+    showModal(modalDialog(
+      title = "How this works",
+      tags$ol(
+        tags$li(strong("Join the study"),
+                " — paste the invite link your coordinator sent, and confirm."),
+        tags$li(strong("Choose your data file"),
+                " (a CSV) — from the list, or Browse for it."),
+        tags$li(strong("Start Server"), " — this lets the coordinator run analyses on ",
+                "your data ", strong("without the data ever leaving this computer"), "."),
+        tags$li(strong("Keep this window open"), " during the session. Stop the server ",
+                "or close the window when the study is done.")),
+      p(class = "note",
+        "Only aggregate statistics are ever sent to the coordinator — never ",
+        "individual patient records."),
+      easyClose = TRUE, footer = modalButton("Got it")))
   })
 
   # ---- Join: parse + verify + pin + save -------------------------
@@ -455,21 +489,33 @@ server <- function(input, output, session) {
     span(class = paste0("bdg bdg-", rv$status), lbl)
   })
 
-  # ---- Address display (only shown while running) ----------------
+  # ---- Address + connected confirmation (shown while running) ----
   output$address_ui <- renderUI({
     if (rv$status == "stopped") return(NULL)
-    port <- isolate(rv$port)
-    if (nzchar(rv$ts_ip)) {
+    port    <- isolate(rv$port)
+    running <- rv$status == "running"
+    on_ts   <- nzchar(rv$ts_ip)
+    addr    <- if (on_ts) sprintf("http://%s:%d", rv$ts_ip, port)
+               else sprintf("http://localhost:%d", port)
+    tagList(
+      # Plain-language "you're done" reassurance for a non-technical operator
+      # — the status badge + technical log alone don't say "you can walk away".
+      if (running)
+        div(class = "privacy",
+            strong("✓ You're connected — keep this window open."),
+            br(),
+            "You can minimize it. The coordinator can now run analyses on your ",
+            "data (which never leaves this computer). Click Stop Server, or close ",
+            "this window, when the study session is over."),
       div(class = "addr",
-          div(class = "addr-lbl", "Your address (the coordinator reaches you here)"),
-          div(class = "addr-url", sprintf("http://%s:%d", rv$ts_ip, port)))
-    } else {
-      div(class = "addr",
-          div(class = "addr-lbl", "Local address (Tailscale not detected)"),
-          div(class = "addr-url", sprintf("http://localhost:%d", port)),
-          div(style = "font-size:.82em; color:#666; margin-top:4px;",
-              "The coordinator must be on the same machine or local network."))
-    }
+          div(class = "addr-lbl",
+              if (on_ts) "Your address (the coordinator reaches you here)"
+              else "Local address (Tailscale not detected)"),
+          div(class = "addr-url", addr),
+          if (!on_ts)
+            div(style = "font-size:.82em; color:#666; margin-top:4px;",
+                "The coordinator must be on the same machine or local network."))
+    )
   })
 
   # ---- File selector: the data/ folder dropdown and Browse are always
@@ -482,6 +528,15 @@ server <- function(input, output, session) {
   })
 
   output$file_ui <- renderUI({
+    # While the server is running the data file is locked in — show what's
+    # being served instead of an editable picker, so it's clear it's in use.
+    if (rv$status != "stopped") {
+      return(div(class = "note", style = "margin-top:2px;",
+                 "Serving: ",
+                 strong(if (!is.na(rv$data_name)) rv$data_name else "(your data file)"),
+                 tags$span(style = "color:var(--ink-muted);",
+                           " — stop the server to change it.")))
+    }
     files <- csv_files_rv()
     tagList(
       div(style = "display:flex; justify-content:space-between; align-items:baseline;",
@@ -538,6 +593,10 @@ server <- function(input, output, session) {
       showNotification("Select a data file first.",
                        type = "error"); return()
     }
+    # Display name for the "Serving: …" line (uploads have a temp datapath, so
+    # prefer the original filename the browser reported).
+    rv$data_name <- if (!is.null(input$data_file_upload)) input$data_file_upload$name
+                    else basename(data_path)
 
     port <- .find_free_port()
     if (is.na(port)) {
