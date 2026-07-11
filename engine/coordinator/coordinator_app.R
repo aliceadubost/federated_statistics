@@ -380,6 +380,67 @@ paste(sections, collapse = "\n"),
 }
 
 # ---------------------------------------------------------------
+# Saving results as Excel: each table output becomes its own worksheet,
+# plus a "Study info" sheet (name / sites / date / privacy note) and a
+# "Notes" sheet for text outputs. Plots can't live in a spreadsheet — they
+# stay in the HTML report. Returns a named list of data.frames for
+# writexl::write_xlsx(). Pure / testable.
+# ---------------------------------------------------------------
+# Excel sheet names: <=31 chars, none of []:*?/\, and unique in the book.
+.xlsx_sheet_name <- function(name, used) {
+  s <- gsub("[][:*?/\\\\]", " ", name, perl = TRUE)
+  s <- trimws(gsub("[[:cntrl:]]", " ", s))
+  if (!nzchar(s)) s <- "Sheet"
+  s <- substr(s, 1L, 31L)
+  base <- s; k <- 1L
+  while (s %in% used) {
+    suf <- sprintf(" (%d)", k)
+    s <- paste0(substr(base, 1L, 31L - nchar(suf)), suf); k <- k + 1L
+  }
+  s
+}
+
+build_results_workbook <- function(outputs = NULL, title = NULL, val_txt = NULL,
+                                    warnings = character(0), n_sites = NA_integer_,
+                                    now = Sys.time()) {
+  sheets <- list(); used <- character(0)
+  add <- function(nm, df) {
+    s <- .xlsx_sheet_name(nm, used); used <<- c(used, s); sheets[[s]] <<- df
+  }
+
+  priv <- grep("Privacy suppression", warnings, value = TRUE)
+  info <- data.frame(
+    Field = c("Study", "Sites", "Generated",
+              if (length(priv)) "Privacy note"),
+    Value = c(if (is.null(title) || !nzchar(title)) "Federated Analysis" else title,
+              if (is.na(n_sites)) "" else as.character(n_sites),
+              format(now, "%Y-%m-%d %H:%M"),
+              if (length(priv)) paste(priv, collapse = " | ")),
+    stringsAsFactors = FALSE)
+  add("Study info", info)
+
+  notes <- list()
+  if (!is.null(outputs)) for (out in outputs) {
+    if (identical(out$type, "table")) {
+      add(out$name, as.data.frame(out$value, stringsAsFactors = FALSE))
+    } else if (identical(out$type, "text")) {
+      txt <- if (is.character(out$value)) paste(out$value, collapse = "\n")
+             else paste(utils::capture.output(print(out$value)), collapse = "\n")
+      notes[[length(notes) + 1L]] <-
+        data.frame(Output = out$name, Content = txt, stringsAsFactors = FALSE)
+    }
+  }
+  if (length(notes)) add("Notes", do.call(rbind, notes))
+
+  if (!is.null(val_txt) && nzchar(val_txt))
+    add("Validation",
+        data.frame(Validation = strsplit(val_txt, "\n", fixed = TRUE)[[1]],
+                   stringsAsFactors = FALSE))
+
+  sheets
+}
+
+# ---------------------------------------------------------------
 # UI
 # ---------------------------------------------------------------
 ui <- fluidPage(
@@ -1082,9 +1143,13 @@ server <- function(input, output, session) {
     # Shown whenever there is something to save.
     have_results <- !is.null(rv$outputs) || !is.null(rv$val_txt)
     if (!have_results) return(tabs)
+    has_table <- !is.null(rv$outputs) &&
+      any(vapply(rv$outputs, function(o) identical(o$type, "table"), logical(1)))
     tagList(
-      div(style = "display:flex; justify-content:flex-end; margin-bottom:10px;",
-          downloadButton("download_report", "Save results",
+      div(style = "display:flex; justify-content:flex-end; gap:8px; margin-bottom:10px;",
+          if (has_table)
+            downloadButton("download_xlsx", "Excel", class = "btn-default btn-sm"),
+          downloadButton("download_report", "Report (HTML)",
                          class = "btn-primary btn-sm")),
       tabs
     )
@@ -1119,6 +1184,28 @@ server <- function(input, output, session) {
         n_sites     = length(active_sites())
       )
       writeLines(html, file, useBytes = TRUE)
+    }
+  )
+
+  # ---- Save results: an Excel workbook (a sheet per table) --------
+  output$download_xlsx <- downloadHandler(
+    filename = function() {
+      ttl  <- if (!is.null(rv$meta)) rv$meta$title else "federated-analysis"
+      slug <- gsub("(^-|-$)", "", gsub("[^A-Za-z0-9]+", "-", trimws(ttl)))
+      sprintf("%s_%s.xlsx", if (nzchar(slug)) slug else "results",
+              format(Sys.time(), "%Y-%m-%d_%H%M"))
+    },
+    content = function(file) {
+      if (!requireNamespace("writexl", quietly = TRUE))
+        stop("The 'writexl' package is needed for Excel export. Install it with install.packages('writexl').")
+      wb <- build_results_workbook(
+        outputs  = rv$outputs,
+        title    = if (!is.null(rv$meta)) rv$meta$title else NULL,
+        val_txt  = rv$val_txt,
+        warnings = rv$run_warnings,
+        n_sites  = length(active_sites())
+      )
+      writexl::write_xlsx(wb, path = file)
     }
   )
 
