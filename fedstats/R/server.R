@@ -25,6 +25,8 @@
 #'   most widely used value in medical data disclosure control). It is
 #'   separate from \code{min_n} (whole-site participation) and cannot be
 #'   lowered by the caller over the wire.
+#' @param label Human-readable site name used in error messages. Defaults to
+#'   \code{"site"}.
 #'
 #' @return A named list of functions with the same interface as
 #'   \code{\link{create_remote_server}}: \code{termnames},
@@ -39,7 +41,7 @@
 #' }
 #'
 #' @export
-create_server <- function(site_data, min_n = 1, min_cell = 5) {
+create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site") {
   if (is.character(site_data)) {
     site_data <- read.csv(site_data, stringsAsFactors = FALSE,
                           na.strings = c("", "NA", "NaN", "NULL"))
@@ -52,6 +54,7 @@ create_server <- function(site_data, min_n = 1, min_cell = 5) {
     stop(sprintf("Site has fewer than %d rows and cannot participate.", min_n))
 
   list(
+    label = label,
 
     # ---- design-matrix term names ----
     termnames = function(formula) {

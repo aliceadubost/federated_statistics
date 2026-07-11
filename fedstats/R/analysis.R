@@ -1,3 +1,15 @@
+# Run one per-site call, and if it fails (site unreachable, timeout, auth,
+# ...) rethrow with the site's name so the coordinator knows exactly which
+# site to chase — "Site 'Sweden' unreachable" instead of an opaque error
+# with no idea which of N sites dropped. Deliberate stops raised *after* the
+# call returns (e.g. small-cell refusal) are unaffected.
+.site_call <- function(srv, fn) {
+  tryCatch(fn(srv), error = function(e) {
+    lbl <- if (!is.null(srv$label)) srv$label else "a site"
+    stop(sprintf("Site '%s': %s", lbl, conditionMessage(e)), call. = FALSE)
+  })
+}
+
 #' Federated numeric summary
 #'
 #' Computes the pooled count, mean, and standard deviation for a numeric
@@ -13,7 +25,7 @@
 fed_numeric <- function(servers, varname) {
   n <- 0; s <- 0; ss <- 0
   for (srv in servers) {
-    r  <- srv$summary_numeric(varname)
+    r  <- .site_call(srv, function(s) s$summary_numeric(varname))
     n  <- n  + r$n
     s  <- s  + r$sum
     ss <- ss + r$sumsq
@@ -42,7 +54,7 @@ fed_numeric <- function(servers, varname) {
 fed_group_numeric <- function(servers, varname, groupvar) {
   # Collect per-site, per-group sufficient statistics
   site_stats <- lapply(servers, function(srv)
-    srv$group_summaries(varname, groupvar)$stats)
+    .site_call(srv, function(s) s$group_summaries(varname, groupvar))$stats)
 
   # Union of all group levels seen across sites
   all_levels <- sort(unique(unlist(lapply(site_stats, names))))
@@ -98,7 +110,7 @@ fed_welch_t <- function(servers, varname, groupvar, group1, group2) {
   n2 <- s2 <- ss2 <- 0
 
   for (srv in servers) {
-    stats <- srv$group_summaries(varname, groupvar)$stats
+    stats <- .site_call(srv, function(s) s$group_summaries(varname, groupvar))$stats
     a <- stats[[as.character(group1)]]
     b <- stats[[as.character(group2)]]
     # A requested group withheld for privacy at any site would silently bias
@@ -147,7 +159,7 @@ fed_welch_t <- function(servers, varname, groupvar, group1, group2) {
 fed_chisq_2x2 <- function(servers, xvar, yvar, correct = TRUE) {
   n00 <- n01 <- n10 <- n11 <- 0
   for (srv in servers) {
-    r   <- srv$counts_2x2(xvar, yvar)
+    r   <- .site_call(srv, function(s) s$counts_2x2(xvar, yvar))
     # If a site withheld its table (a cell below the privacy threshold), the
     # pooled test cannot be formed without that site. Refuse rather than
     # compute on an incomplete table.
@@ -189,7 +201,7 @@ fed_lm <- function(servers, formula) {
   XtX <- NULL; Xty <- NULL; yTy <- 0; N <- 0; termnames <- NULL
 
   for (srv in servers) {
-    r <- srv$lm_suffstats(formula)
+    r <- .site_call(srv, function(s) s$lm_suffstats(formula))
     if (is.null(termnames)) termnames <- r$termnames
     if (is.null(XtX)) {
       XtX <- r$XtX; Xty <- r$Xty
@@ -245,13 +257,14 @@ fed_logistic_newton <- function(servers, formula,
                                 tol_loglik     = 1e-10,
                                 robust_cluster = TRUE,
                                 verbose        = FALSE) {
-  termnames <- servers[[1]]$termnames(formula)
+  termnames <- .site_call(servers[[1]], function(s) s$termnames(formula))
   p    <- length(termnames)
   beta <- setNames(rep(0, p), termnames)
 
   federated_loglik <- function(b) {
     total <- 0
-    for (srv in servers) total <- total + srv$grad_hess(formula, b)$ll
+    for (srv in servers)
+      total <- total + .site_call(srv, function(s) s$grad_hess(formula, b))$ll
     total
   }
 
@@ -261,7 +274,7 @@ fed_logistic_newton <- function(servers, formula,
   for (iter in seq_len(max_iter)) {
     grad <- rep(0, p);  hess <- matrix(0, p, p)
     for (srv in servers) {
-      r    <- srv$grad_hess(formula, beta)
+      r    <- .site_call(srv, function(s) s$grad_hess(formula, beta))
       grad <- grad + r$grad
       hess <- hess + r$hess
     }
@@ -281,7 +294,7 @@ fed_logistic_newton <- function(servers, formula,
   site_scores <- vector("list", length(servers))
   N           <- 0
   for (i in seq_along(servers)) {
-    r              <- servers[[i]]$grad_hess(formula, beta)
+    r              <- .site_call(servers[[i]], function(s) s$grad_hess(formula, beta))
     hess           <- hess + r$hess
     site_scores[[i]] <- as.numeric(r$grad)
     N              <- N + r$n

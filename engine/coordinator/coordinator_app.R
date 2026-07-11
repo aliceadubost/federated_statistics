@@ -1064,7 +1064,7 @@ server <- function(input, output, session) {
     if (is.null(rv$meta) || is.null(rv$meta$vars_spec)) {
       showNotification("Load an analysis script first.", type = "warning"); return()
     }
-    ss <- lapply(sites, function(s) create_remote_server(s$url, s$token))
+    ss <- lapply(sites, function(s) create_remote_server(s$url, s$token, label = s$name))
 
     withProgress(message = "Validating sites…", {
       v <- tryCatch(
@@ -1096,7 +1096,7 @@ server <- function(input, output, session) {
     if (is.null(rv$meta) || is.null(rv$script_path)) {
       showNotification("Choose an analysis first.", type = "warning"); return()
     }
-    ss     <- lapply(sites, function(s) create_remote_server(s$url, s$token))
+    ss     <- lapply(sites, function(s) create_remote_server(s$url, s$token, label = s$name))
     script <- rv$script_path
 
     # capture.output() only grabs printed output; warnings go to stderr and

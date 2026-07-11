@@ -113,6 +113,9 @@
 #'   \code{"http://100.74.226.3:8000"}.
 #' @param token Optional bearer token. Defaults to the environment
 #'   variable \code{FED_API_TOKEN}.
+#' @param label Human-readable site name used in error messages (e.g. so a
+#'   failed call reports "Sweden" rather than an opaque URL). Defaults to
+#'   \code{base_url}.
 #'
 #' @return A named list of functions matching the interface of
 #'   \code{\link{create_server}}.
@@ -125,8 +128,10 @@
 #'
 #' @export
 create_remote_server <- function(base_url,
-                                 token = Sys.getenv("FED_API_TOKEN")) {
+                                 token = Sys.getenv("FED_API_TOKEN"),
+                                 label = base_url) {
   list(
+    label = label,
 
     termnames = function(formula) {
       r <- .remote_post(base_url, "/termnames",
