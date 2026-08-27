@@ -35,23 +35,22 @@ reg_default_path <- function() {
 # reg_check_perms() which warns if it didn't take.
 reg_harden_file <- function(path) {
   if (!file.exists(path)) return(invisible(FALSE))
-  if (.Platform$OS.type == "windows") {
-    user <- Sys.getenv("USERNAME")
-    if (nzchar(user)) {
-      try(system2("icacls", c(shQuote(path), "/inheritance:r",
-                              "/grant:r", shQuote(paste0(user, ":F"))),
-                  stdout = FALSE, stderr = FALSE), silent = TRUE)
-    }
-  } else {
+  if (requireNamespace("fedstats", quietly = TRUE))
+    return(invisible(fedstats::fed_harden_file(path)))
+  if (.Platform$OS.type != "windows")
     try(Sys.chmod(path, mode = "0600"), silent = TRUE)
-  }
   invisible(TRUE)
 }
 
 # Returns a warning string if the file is readable beyond its owner,
-# else "". On Windows this is best-effort (we rely on harden-on-write).
+# else "". Includes a best-effort ACL check on Windows.
 reg_check_perms <- function(path) {
   if (!file.exists(path)) return("")
+  if (requireNamespace("fedstats", quietly = TRUE)) {
+    msg <- fedstats::fed_check_file_perms(path)
+    if (nzchar(msg)) return(paste0(msg, " This file contains site tokens."))
+    return("")
+  }
   if (.Platform$OS.type == "windows") return("")
   mode <- file.info(path)$mode
   if (is.na(mode)) return("")

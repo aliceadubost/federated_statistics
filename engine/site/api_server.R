@@ -39,6 +39,15 @@ MIN_N     <- as.integer(get_arg("--min-n", "FED_MIN_N", "20"))
 # per-variable extremes). Separate from MIN_N (whole-site participation);
 # 5 is the standard medical disclosure-control cell threshold.
 MIN_CELL  <- as.integer(get_arg("--min-cell", "FED_MIN_CELL", "5"))
+VALIDATE_QUANTILE_MIN_N <- as.integer(get_arg("--validate-quantile-min-n",
+                                              "FED_VALIDATE_QUANTILE_MIN_N", "20"))
+QUERY_LOG_FILE          <- get_arg("--query-log", "FED_QUERY_LOG_FILE",
+                                   file.path("engine", "site", "site_query_audit.jsonl"))
+QUERY_RATE_MAX          <- as.integer(get_arg("--query-rate-max", "FED_QUERY_RATE_MAX", "500"))
+QUERY_RATE_WINDOW       <- as.numeric(get_arg("--query-rate-window", "FED_QUERY_RATE_WINDOW", "600"))
+QUERY_DUP_WINDOW        <- as.numeric(get_arg("--query-dup-window", "FED_QUERY_DUP_WINDOW", "60"))
+QUERY_SCOPE_MAX         <- as.integer(get_arg("--query-scope-max", "FED_QUERY_SCOPE_MAX", "50"))
+QUERY_SCOPE_WINDOW      <- as.numeric(get_arg("--query-scope-window", "FED_QUERY_SCOPE_WINDOW", "3600"))
 
 if (is.null(DATA_FILE) || !nzchar(DATA_FILE)) {
   stop("Provide --data <csv_path> or set FED_DATA_FILE.")
@@ -54,9 +63,11 @@ site_data <- read.csv(
   na.strings = c("", "NA", "NaN", "NULL")
 )
 
-srv <- create_server(site_data, min_n = MIN_N, min_cell = MIN_CELL)
+srv <- create_server(site_data, min_n = MIN_N, min_cell = MIN_CELL,
+                     validate_quantile_min_n = VALIDATE_QUANTILE_MIN_N)
 cat(sprintf("[api_server] Loaded %d rows. min_n=%d, min_cell=%d. Listening on port %d.\n",
             nrow(site_data), MIN_N, MIN_CELL, PORT))
+cat(sprintf("[api_server] Query audit log: %s\n", QUERY_LOG_FILE))
 
 # ------------------------------------------------------------------
 # Helpers: input validation for the structured model_spec protocol
@@ -95,6 +106,16 @@ cat(sprintf("[api_server] Loaded %d rows. min_n=%d, min_cell=%d. Listening on po
   as.formula(paste(outcome, "~", rhs), env = baseenv())
 }
 
+.model_scope <- function(spec) {
+  if (is.null(spec)) return(NULL)
+  list(
+    outcome = .validate_varname(spec$outcome),
+    predictors = sort(vapply(unlist(spec$predictors, use.names = FALSE),
+                             .validate_varname, character(1L))),
+    intercept = !identical(spec$intercept, FALSE)
+  )
+}
+
 # ------------------------------------------------------------------
 # Helper: check bearer token if one is configured
 # ------------------------------------------------------------------
@@ -120,6 +141,107 @@ check_auth_401 <- function(req, res) {
 }
 
 # ------------------------------------------------------------------
+# Query audit + anti-differencing guards
+# ------------------------------------------------------------------
+.query_state <- new.env(parent = emptyenv())
+.query_state$rate <- list()
+.query_state$scope <- list()
+
+.sort_recursive <- function(x) {
+  if (is.list(x)) {
+    if (!is.null(names(x))) x <- x[order(names(x))]
+    x <- lapply(x, .sort_recursive)
+  }
+  x
+}
+
+.canonical_json <- function(x) {
+  as.character(jsonlite::toJSON(.sort_recursive(x), auto_unbox = TRUE, null = "null"))
+}
+
+.hash_text <- function(x, n = 24L) {
+  substr(sodium::bin2hex(sodium::sha256(charToRaw(x))), 1L, n)
+}
+
+.audit_append <- function(actor, endpoint, decision, scope = NULL, reason = NULL) {
+  dir.create(dirname(QUERY_LOG_FILE), recursive = TRUE, showWarnings = FALSE)
+  rec <- list(
+    time = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+    actor = actor,
+    endpoint = endpoint,
+    decision = decision,
+    scope = scope,
+    reason = reason
+  )
+  line <- jsonlite::toJSON(rec, auto_unbox = TRUE, null = "null")
+  cat(line, "\n", file = QUERY_LOG_FILE, append = TRUE, sep = "")
+}
+
+.actor_id <- function(req) {
+  auth <- req$HTTP_AUTHORIZATION
+  if (!is.null(auth) && grepl("^Bearer ", auth)) {
+    token <- sub("^Bearer ", "", auth)
+    return(paste0("token_", .hash_text(token)))
+  }
+  ip <- if (!is.null(req$REMOTE_ADDR)) req$REMOTE_ADDR else "unknown"
+  paste0("ip_", .hash_text(ip))
+}
+
+.scope_signature <- function(endpoint, scope) {
+  .hash_text(.canonical_json(list(endpoint = endpoint, scope = scope)), n = 32L)
+}
+
+.query_guard <- function(req, res, endpoint, scope = NULL, sensitive = FALSE) {
+  actor <- .actor_id(req)
+  now <- as.numeric(Sys.time())
+
+  hits <- .query_state$rate[[actor]]
+  hits <- if (is.null(hits)) numeric(0) else hits[hits > now - QUERY_RATE_WINDOW]
+  if (length(hits) >= QUERY_RATE_MAX) {
+    res$status <- 429
+    .query_state$rate[[actor]] <- hits
+    .audit_append(actor, endpoint, "blocked_rate", scope,
+                  sprintf(">%d requests in %.0f seconds", QUERY_RATE_MAX, QUERY_RATE_WINDOW))
+    return(list(error = "Too many requests in a short time. Please wait before querying this site again."))
+  }
+  .query_state$rate[[actor]] <- c(hits, now)
+
+  if (sensitive) {
+    sig <- .scope_signature(endpoint, scope)
+    hist <- .query_state$scope[[actor]]
+    if (is.null(hist)) hist <- list()
+
+    keep_recent <- vapply(hist, function(x) is.list(x) && !is.null(x$ts) &&
+                            x$ts > now - QUERY_SCOPE_WINDOW, logical(1))
+    hist <- hist[keep_recent]
+
+    seen <- hist[[sig]]
+    if (!is.null(seen) && (now - seen$ts) < QUERY_DUP_WINDOW) {
+      res$status <- 429
+      .query_state$scope[[actor]] <- hist
+      .audit_append(actor, endpoint, "blocked_duplicate", scope,
+                    sprintf("Repeated sensitive query within %.0f seconds", QUERY_DUP_WINDOW))
+      return(list(error = "This same sensitive query was asked very recently. Reuse the existing result or wait a little before trying again."))
+    }
+
+    if (is.null(seen) && length(hist) >= QUERY_SCOPE_MAX) {
+      res$status <- 429
+      .query_state$scope[[actor]] <- hist
+      .audit_append(actor, endpoint, "blocked_scope_budget", scope,
+                    sprintf(">%d distinct sensitive queries in %.0f seconds",
+                            QUERY_SCOPE_MAX, QUERY_SCOPE_WINDOW))
+      return(list(error = "Too many distinct sensitive queries were requested from this site. Narrow the analysis plan or wait before probing more variables."))
+    }
+
+    hist[[sig]] <- list(ts = now, scope = scope, endpoint = endpoint)
+    .query_state$scope[[actor]] <- hist
+  }
+
+  .audit_append(actor, endpoint, "allowed", scope)
+  NULL
+}
+
+# ------------------------------------------------------------------
 # Plumber API definition
 # ------------------------------------------------------------------
 #* @apiTitle Federated Statistics Site API
@@ -142,6 +264,9 @@ pr$handle("POST", "/termnames", function(req, res) {
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     if (!is.null(body$formula))
       stop("formula field no longer accepted; send model_spec instead.")
+    scope <- .model_scope(body$model_spec)
+    gate <- .query_guard(req, res, "termnames", scope, sensitive = FALSE)
+    if (!is.null(gate)) return(gate)
     formula <- .spec_to_formula(body$model_spec, site_data)
     list(termnames = as.list(srv$termnames(formula)))
   }, error = function(e) {
@@ -161,6 +286,9 @@ pr$handle("POST", "/grad_hess", function(req, res) {
     if (!identical(family, "binomial_logit"))
       stop(paste0("Unsupported family: '", family,
                   "'. Only binomial_logit is currently supported."))
+    scope <- c(.model_scope(body$model_spec), list(family = family))
+    gate <- .query_guard(req, res, "grad_hess", scope, sensitive = FALSE)
+    if (!is.null(gate)) return(gate)
     formula    <- .spec_to_formula(body$model_spec, site_data)
     beta_vals  <- as.numeric(unlist(body$beta, use.names = FALSE))
     beta_names <- unlist(body$beta_names)
@@ -195,6 +323,9 @@ pr$handle("POST", "/lm_suffstats", function(req, res) {
     body <- jsonlite::fromJSON(req$postBody, simplifyVector = FALSE)
     if (!is.null(body$formula))
       stop("formula field no longer accepted; send model_spec instead.")
+    scope <- .model_scope(body$model_spec)
+    gate <- .query_guard(req, res, "lm_suffstats", scope, sensitive = FALSE)
+    if (!is.null(gate)) return(gate)
     formula <- .spec_to_formula(body$model_spec, site_data)
 
     r <- srv$lm_suffstats(formula)
@@ -226,6 +357,9 @@ pr$handle("POST", "/summary_numeric", function(req, res) {
     varname <- .validate_varname(body$varname)
     if (!varname %in% names(site_data))
       stop(paste0("Variable not found in dataset: '", varname, "'"))
+    gate <- .query_guard(req, res, "summary_numeric",
+                         list(varname = varname), sensitive = TRUE)
+    if (!is.null(gate)) return(gate)
     r <- srv$summary_numeric(varname)
     list(type = r$type, n = r$n, sum = r$sum, sumsq = r$sumsq)
   }, error = function(e) {
@@ -245,6 +379,10 @@ pr$handle("POST", "/group_summaries", function(req, res) {
     if (length(missing_vars) > 0L)
       stop(paste0("Variable(s) not found in dataset: ",
                   paste(missing_vars, collapse = ", ")))
+    gate <- .query_guard(req, res, "group_summaries",
+                         list(varname = varname, groupvar = groupvar),
+                         sensitive = TRUE)
+    if (!is.null(gate)) return(gate)
     r <- srv$group_summaries(varname, groupvar)
 
     # Convert each group's stats list to JSON-safe form. A group below the
@@ -273,6 +411,9 @@ pr$handle("POST", "/counts_2x2", function(req, res) {
     if (length(missing_vars) > 0L)
       stop(paste0("Variable(s) not found in dataset: ",
                   paste(missing_vars, collapse = ", ")))
+    gate <- .query_guard(req, res, "counts_2x2",
+                         list(vars = sort(c(xvar, yvar))), sensitive = TRUE)
+    if (!is.null(gate)) return(gate)
     r <- srv$counts_2x2(xvar, yvar)
     # If any cell was below the threshold the whole table is withheld —
     # forward the marker (and only the safe total), never the cells.
@@ -308,6 +449,15 @@ pr$handle("POST", "/validate", function(req, res) {
     formula   <- if (!is.null(body$model_spec))
                    .spec_to_formula(body$model_spec, site_data) else NULL
     min_n     <- if (!is.null(body$min_n)) as.integer(body$min_n) else 20L
+    gate <- .query_guard(
+      req, res, "validate",
+      list(
+        vars = sort(names(vars_spec)),
+        model = .model_scope(body$model_spec)
+      ),
+      sensitive = TRUE
+    )
+    if (!is.null(gate)) return(gate)
     srv$validate_data(vars_spec, formula, min_n)
   }, error = function(e) {
     res$status <- 400

@@ -3,6 +3,7 @@ engine/coordinator/registered_sites.json
 engine/coordinator/coordinator_key.json
 engine/coordinator/study_log.jsonl
 engine/site/site_config.json
+engine/site/site_query_audit.jsonl
 *.lock
 
 # Data - never upload

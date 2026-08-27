@@ -35,10 +35,25 @@ suppressPackageStartupMessages({
 if (!dir.exists(.data_dir))
   dir.create(.data_dir, recursive = TRUE, showWarnings = FALSE)
 
+# Recursive: operators file their exports in subfolders (data/2026/, data/clean/,
+# data/edge/, …) and would otherwise be told the folder is empty.
 .scan_csvs <- function() {
-  found <- list.files(.data_dir, pattern = "\\.csv$", full.names = TRUE)
-  if (length(found)) return(found)
+  found <- list.files(.data_dir, pattern = "\\.csv$", full.names = TRUE,
+                      recursive = TRUE)
+  if (length(found)) return(sort(found))
   list.files(.app_root, pattern = "\\.csv$", full.names = TRUE, recursive = FALSE)
+}
+
+# Label for the dropdown. Two files in different subfolders can share a base
+# name (data/clean/site1.csv and data/edge/site1.csv), so show the path
+# relative to data/ — a bare basename would make them indistinguishable and the
+# operator could serve the wrong cohort without noticing.
+.csv_label <- function(paths) {
+  rel  <- gsub("\\\\", "/", paths)
+  base <- gsub("\\\\", "/", .data_dir)
+  ifelse(startsWith(rel, paste0(base, "/")),
+         substring(rel, nchar(base) + 2L),
+         basename(paths))
 }
 
 # ---- Tailscale IP ---------------------------------------------------
@@ -53,6 +68,16 @@ if (!dir.exists(.data_dir))
     ip  <- trimws(system(cmd, intern = TRUE, ignore.stderr = TRUE))
     if (length(ip) && nzchar(ip[1])) ip[1] else ""
   }, error = function(e) "")
+}
+
+# Addresses on which the api_server subprocess may be answering /health.
+# It binds via fed_bind_host() (tailnet IP if Tailscale is up, else loopback,
+# or a FED_BIND_HOST override), so ask that same helper first; loopback stays
+# as a fallback for the no-Tailscale case and for a 0.0.0.0 override.
+.health_hosts <- function() {
+  bound <- if (.fedstats_ok)
+    tryCatch(fedstats::fed_bind_host()$host, error = function(e) "") else ""
+  unique(c(if (nzchar(bound)) bound, "127.0.0.1"))
 }
 
 # ---- Automatic port selection ---------------------------------------
@@ -85,6 +110,38 @@ if (!dir.exists(.data_dir))
 .save_config <- function(cfg) {
   writeLines(jsonlite::toJSON(cfg, auto_unbox = TRUE), .config_file)
   if (.fedstats_ok) try(fedstats::fed_harden_file(.config_file), silent = TRUE)
+}
+
+.config_perm_warning <- function() {
+  if (!.fedstats_ok || !file.exists(.config_file)) return("")
+  tryCatch(fedstats::fed_check_file_perms(.config_file),
+           error = function(e) "")
+}
+
+.validate_invite_link <- function(raw) {
+  parsed <- tryCatch(httr::parse_url(raw), error = function(e) NULL)
+  if (is.null(parsed) || is.null(parsed$scheme) || is.null(parsed$hostname))
+    stop("That invite link is malformed.")
+
+  scheme <- tolower(parsed$scheme)
+  host   <- tolower(parsed$hostname)
+  path   <- if (!is.null(parsed$path)) parsed$path else ""
+  port   <- if (!is.null(parsed$port)) parsed$port else ""
+
+  allow_local <- identical(Sys.getenv("FED_ALLOW_LOCAL_INVITE_LINK", "0"), "1")
+  host_ok <- grepl("\\.ts\\.net$", host) || grepl("^100\\.[0-9]+\\.[0-9]+\\.[0-9]+$", host)
+  local_ok <- allow_local && host %in% c("localhost", "127.0.0.1")
+
+  if (!scheme %in% c("http", "https"))
+    stop("Invite links must use http:// or https://.")
+  if (!(host_ok || local_ok))
+    stop("For safety, invite links must point to the coordinator on Tailscale.")
+  if (!grepl("^/i/[A-Za-z0-9_-]+/?$", path))
+    stop("Invite links must be the coordinator's short /i/<sid> link.")
+  if (nzchar(port) && !identical(port, "8731"))
+    stop("Invite links must use the coordinator's registrar port 8731.")
+
+  raw
 }
 
 # Register this site back to its coordinator. Returns a status string.
@@ -263,7 +320,12 @@ server <- function(input, output, session) {
     need_register = FALSE,      # register once the server reaches "running"
     ts_ip        = .get_ts_ip(),# live Tailscale IP, refreshed below
     port         = NA_integer_, # chosen automatically at Start Server time
-    data_name    = NA_character_# display name of the file being served
+    data_name    = NA_character_,# display name of the file being served
+    # The invite the "Join this study?" dialog is currently asking about, in
+    # FEDSTAT2 form. When the operator pastes a short link, the text box holds
+    # a URL, not an invite — so the confirm handler must re-use what the link
+    # resolved to, not re-read the box.
+    pending_invite = NULL
   )
 
   # Re-check Tailscale every few seconds so connecting *after* this app is
@@ -295,14 +357,20 @@ server <- function(input, output, session) {
         # mean the bind succeeded (a busy port fails right after that line).
         # Trusting the log alone previously caused a false "Registered with
         # coordinator" for a server that then crashed on bind.
+        # Probe the host api_server.R actually bound to, not loopback: with
+        # Tailscale up it binds to the tailnet IP *only*, so 127.0.0.1 refuses
+        # the connection and the server would look permanently unhealthy —
+        # leaving the site stuck on "Starting…" and never registering.
         port  <- isolate(rv$port)
         token <- if (!is.null(isolate(rv$config))) isolate(rv$config)$token else ""
-        healthy <- !is.na(port) && tryCatch({
-          hdrs <- if (nzchar(token))
-            httr::add_headers(Authorization = paste("Bearer", token)) else NULL
-          r <- httr::GET(sprintf("http://127.0.0.1:%d/health", port), hdrs, httr::timeout(1))
-          httr::status_code(r) == 200L
-        }, error = function(e) FALSE)
+        healthy <- !is.na(port) && any(vapply(.health_hosts(), function(h) {
+          tryCatch({
+            hdrs <- if (nzchar(token))
+              httr::add_headers(Authorization = paste("Bearer", token)) else NULL
+            r <- httr::GET(sprintf("http://%s:%d/health", h, port), hdrs, httr::timeout(1))
+            httr::status_code(r) == 200L
+          }, error = function(e) FALSE)
+        }, logical(1)))
 
         if (healthy) {
           rv$status <- "running"
@@ -344,6 +412,14 @@ server <- function(input, output, session) {
             tags$code('devtools::install("fedstats")'),
             br(),
             "then restart this window"),
+      { perm_warn <- .config_perm_warning()
+        if (nzchar(perm_warn))
+          div(class = "warn-box",
+              strong("Secret file warning"),
+              br(),
+              perm_warn,
+              br(),
+              "This file contains the site's token and private key.") },
       if (!nzchar(rv$ts_ip))
         div(class = "warn-box",
             strong("Tailscale not detected"),
@@ -404,6 +480,7 @@ server <- function(input, output, session) {
     # text is also accepted — resolve it to the real invite first.
     if (grepl("^https?://", raw, ignore.case = TRUE)) {
       raw <- tryCatch({
+        .validate_invite_link(raw)
         resp <- httr::GET(raw, httr::timeout(8))
         if (httr::status_code(resp) != 200)
           stop("That link didn't return an invite — it may have expired.")
@@ -421,6 +498,7 @@ server <- function(input, output, session) {
     if (!isTRUE(pr$ok)) {
       showNotification(pr$reason, type = "error", duration = 10); return()
     }
+    rv$pending_invite <- raw
 
     p  <- pr$payload
     fp <- fedstats::fed_fingerprint(pr$pk)
@@ -453,7 +531,13 @@ server <- function(input, output, session) {
 
   observeEvent(input$join_confirm, {
     removeModal()
-    pr <- fedstats::fed_invite_parse(trimws(input$invite))
+    # Parse the invite the dialog was actually about — NOT input$invite, which
+    # still holds whatever the operator pasted (possibly a short link).
+    raw <- rv$pending_invite
+    if (is.null(raw)) {
+      showNotification("No invite to join. Paste it again.", type = "error"); return()
+    }
+    pr <- fedstats::fed_invite_parse(raw)
     if (!isTRUE(pr$ok)) {
       showNotification(pr$reason, type = "error"); return()
     }
@@ -471,12 +555,15 @@ server <- function(input, output, session) {
                 coord_pk = pr$pk, site_priv = site_priv, site_pub = site_pub)
     .save_config(cfg)
     rv$config <- cfg
+    perm_warn <- .config_perm_warning()
 
     updateTextAreaInput(session, "invite", value = "")
     rv$join_status <- "Joined. Select your data file (if needed) and click Start Server."
     showNotification(paste0("Joined study '", cfg$study,
                             "'. Start the server to register."),
                      type = "message", duration = 8)
+    if (nzchar(perm_warn))
+      showNotification(perm_warn, type = "warning", duration = 12)
   })
 
   # ---- Status badge ----------------------------------------------
@@ -543,7 +630,7 @@ server <- function(input, output, session) {
           tags$span("Data file", style = "font-weight:600; font-size:.92rem; color:var(--ink-muted);"),
           actionLink("btn_refresh_files", "↻ Refresh", style = "font-size:.82rem;")),
       if (length(files) > 0) {
-        selectInput("data_file", NULL, choices = setNames(files, basename(files)))
+        selectInput("data_file", NULL, choices = setNames(files, .csv_label(files)))
       } else {
         div(class = "note", style = "margin-top:2px; margin-bottom:8px;",
             "No files here yet — browse below to pick one, or drop CSVs in the data folder for quick access next time.")
@@ -596,7 +683,7 @@ server <- function(input, output, session) {
     # Display name for the "Serving: …" line (uploads have a temp datapath, so
     # prefer the original filename the browser reported).
     rv$data_name <- if (!is.null(input$data_file_upload)) input$data_file_upload$name
-                    else basename(data_path)
+                    else .csv_label(data_path)
 
     port <- .find_free_port()
     if (is.na(port)) {

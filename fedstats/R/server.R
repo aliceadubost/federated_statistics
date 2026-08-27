@@ -41,7 +41,8 @@
 #' }
 #'
 #' @export
-create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site") {
+create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site",
+                          validate_quantile_min_n = 20L) {
   if (is.character(site_data)) {
     site_data <- read.csv(site_data, stringsAsFactors = FALSE,
                           na.strings = c("", "NA", "NaN", "NULL"))
@@ -50,6 +51,7 @@ create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site") {
     stop("create_server(): site_data must be a data.frame or a CSV path.")
   df <- site_data
   min_cell <- max(1L, as.integer(min_cell))   # a threshold of 0 would disable protection
+  validate_quantile_min_n <- max(min_cell, as.integer(validate_quantile_min_n))
   if (nrow(df) < min_n)
     stop(sprintf("Site has fewer than %d rows and cannot participate.", min_n))
 
@@ -174,7 +176,7 @@ create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site") {
     validate_data = function(vars_spec, formula = NULL, min_n_formula = 20L) {
       # Order statistics (quartiles/median) can coincide with an individual's
       # value, so they need a comfortably large sample before release.
-      quant_gate <- max(min_n, min_cell)
+      quant_gate <- max(min_n, min_cell, validate_quantile_min_n)
 
       var_reports <- lapply(names(vars_spec), function(vname) {
         spec  <- vars_spec[[vname]]
@@ -227,14 +229,22 @@ create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site") {
               oor_mask            <- x_valid < spec$min | x_valid > spec$max
               n_oor               <- sum(oor_mask)
               vrep$expected_range <- c(spec$min, spec$max)
-              vrep$n_out_of_range <- n_oor
-              if (n_oor > 0)
-                # Report only HOW MANY values are out of range, never the
-                # values themselves — an out-of-range value is exactly the
-                # kind of unique outlier that identifies a patient.
+              if (n_oor >= min_cell) {
+                vrep$n_out_of_range <- n_oor
+                if (n_oor > 0)
+                  # Report only HOW MANY values are out of range, never the
+                  # values themselves — an out-of-range value is exactly the
+                  # kind of unique outlier that identifies a patient.
+                  vrep$range_warning <- paste0(
+                    n_oor, " value(s) outside expected range [",
+                    spec$min, ", ", spec$max, "].")
+              } else if (n_oor > 0) {
+                vrep$out_of_range_detected <- TRUE
                 vrep$range_warning <- paste0(
-                  n_oor, " value(s) outside expected range [",
-                  spec$min, ", ", spec$max, "].")
+                  "Out-of-range values detected for expected range [",
+                  spec$min, ", ", spec$max,
+                  "]; exact count suppressed for privacy.")
+              }
             }
             if (vtype == "binary") {
               n_invalid <- sum(!x_valid %in% c(0, 1))
@@ -254,16 +264,21 @@ create_server <- function(site_data, min_n = 1, min_cell = 5, label = "site") {
           # Report which levels exist, but withhold the COUNT of any level
           # below the threshold — a level of size 1-4 pinpoints individuals.
           small <- tab > 0 & tab < min_cell
-          vrep$levels_found        <- as.list(found_lvls)
+          safe_lvls <- sort(names(tab[!small]))
+          vrep$n_levels_found      <- as.integer(length(found_lvls))
+          vrep$levels_present_safe <- as.list(safe_lvls)
           vrep$level_counts        <- as.list(tab[!small])
           vrep$n_levels_suppressed <- as.integer(sum(small))
           if (!is.null(spec$levels)) {
             exp_lvls <- unlist(spec$levels)
             unexp    <- setdiff(found_lvls, exp_lvls)
             miss_lvl <- setdiff(exp_lvls, found_lvls)
-            if (length(unexp) > 0)
+            safe_unexp <- sort(setdiff(safe_lvls, exp_lvls))
+            if (length(safe_unexp) > 0)
               vrep$level_warning <- paste0("Unexpected level(s): ",
-                                           paste(unexp, collapse = ", "))
+                                           paste(safe_unexp, collapse = ", "))
+            if (length(unexp) > length(safe_unexp))
+              vrep$unexpected_levels_suppressed <- TRUE
             if (length(miss_lvl) > 0)
               vrep$missing_levels <- paste0("Expected level(s) absent: ",
                                             paste(miss_lvl, collapse = ", "))

@@ -46,7 +46,17 @@ test_that("validate_data never returns exact min/max or out-of-range values", {
   expect_null(rep$max)
   # a count of out-of-range values, but never the value 999 itself
   expect_false(grepl("999", rep$range_warning))
-  expect_true(grepl("1 value", rep$range_warning))
+  expect_true(isTRUE(rep$out_of_range_detected))
+  expect_null(rep$n_out_of_range)
+})
+
+test_that("validate_data only returns out-of-range counts when they clear min_cell", {
+  d <- data.frame(v = c(rnorm(30, 10, 2), 999, 998, 997, 996, 995))
+  vr <- create_server(d, min_n = 1, min_cell = 5)$validate_data(
+    list(v = list(type = "numeric", min = 0, max = 100)))
+  rep <- vr$var_reports$v
+  expect_equal(rep$n_out_of_range, 5)
+  expect_false(isTRUE(rep$out_of_range_detected))
 })
 
 test_that("validate_data suppresses mean/sd for a tiny sample", {
@@ -71,9 +81,22 @@ test_that("categorical level counts below min_cell are suppressed", {
   vr <- create_server(d, min_n = 1, min_cell = 5)$validate_data(
     list(g = list(type = "categorical")))
   lc <- vr$var_reports$g$level_counts
+  lv <- vr$var_reports$g$levels_present_safe
   expect_null(lc[["rare"]])
   expect_false(is.null(lc[["common"]]))
+  expect_false("rare" %in% unlist(lv, use.names = FALSE))
   expect_equal(vr$var_reports$g$n_levels_suppressed, 1L)
+})
+
+test_that("quartiles use a stricter gate than mean/sd", {
+  d <- data.frame(v = seq_len(12))
+  vr <- create_server(d, min_n = 1, min_cell = 5, validate_quantile_min_n = 20)$validate_data(
+    list(v = list(type = "numeric")))
+  rep <- vr$var_reports$v
+  expect_false(is.null(rep$mean))
+  expect_null(rep$q25)
+  expect_null(rep$median)
+  expect_null(rep$q75)
 })
 
 test_that("inferential tests refuse rather than bias on a suppressed cell", {

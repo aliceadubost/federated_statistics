@@ -54,6 +54,24 @@ fed_advertised_host <- function() {
   fed_tailscale_ip()
 }
 
+.windows_secret_acl_warning <- function(path) {
+  out <- tryCatch(
+    suppressWarnings(system2("icacls", shQuote(path), stdout = TRUE, stderr = TRUE)),
+    error = function(e) character(0)
+  )
+  txt <- paste(out, collapse = "\n")
+  if (!nzchar(txt))
+    return(sprintf("WARNING: could not verify Windows permissions for %s.", path))
+
+  risky <- c("Everyone:", "BUILTIN\\\\Users:", "Authenticated Users:", "Users:")
+  hits <- risky[vapply(risky, function(p) grepl(p, txt, ignore.case = TRUE), logical(1))]
+  if (length(hits) > 0L)
+    return(sprintf(
+      "WARNING: %s may still be readable by other Windows principals (%s).",
+      path, paste(hits, collapse = ", ")))
+  ""
+}
+
 #' Restrict a file to the current user (best-effort, cross-platform)
 #'
 #' Used for files that hold secrets (tokens / private keys). Pairs with
@@ -83,7 +101,7 @@ fed_harden_file <- function(path) {
 #' @export
 fed_check_file_perms <- function(path) {
   if (!file.exists(path)) return("")
-  if (.Platform$OS.type == "windows") return("")  # rely on harden-on-write
+  if (.Platform$OS.type == "windows") return(.windows_secret_acl_warning(path))
   mode <- file.info(path)$mode
   if (is.na(mode)) return("")
   if (bitwAnd(as.integer(mode), strtoi("077", 8L)) != 0L)

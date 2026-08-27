@@ -48,6 +48,7 @@ STUDY_LOG        <- file.path(APP_DIR, "study_log.jsonl")  # append-only run his
 REGISTRAR_SCRIPT <- file.path(APP_DIR, "registrar.R")
 REGISTRAR_PORT   <- as.integer(Sys.getenv("FED_REGISTRAR_PORT", "8731"))
 INVITE_TTL_DAYS  <- as.integer(Sys.getenv("FED_INVITE_TTL_DAYS", "7"))
+MIN_ACTIVE_SITES <- max(2L, as.integer(Sys.getenv("FED_MIN_ACTIVE_SITES", "2")))
 
 # ---- Coordinator signing key: load existing or create once ----------
 .load_or_create_key <- function() {
@@ -90,40 +91,109 @@ onStop(function() {
 }
 
 # ---------------------------------------------------------------
-# Script metadata extraction
+# Script metadata extraction (no code execution)
 # ---------------------------------------------------------------
+.safe_eval_meta <- function(expr) {
+  if (is.null(expr)) return(NULL)
+  if (is.atomic(expr) && length(expr) == 1L) return(expr)
+  if (is.symbol(expr)) {
+    name <- as.character(expr)
+    if (identical(name, "NULL"))  return(NULL)
+    if (identical(name, "TRUE"))  return(TRUE)
+    if (identical(name, "FALSE")) return(FALSE)
+    stop(sprintf("Unsupported symbol in metadata: %s", name))
+  }
+  if (!is.call(expr))
+    stop("Unsupported metadata expression.")
+
+  fn <- as.character(expr[[1L]])
+  args <- as.list(expr[-1L])
+
+  if (identical(fn, "{")) {
+    out <- NULL
+    for (part in args) out <- .safe_eval_meta(part)
+    return(out)
+  }
+
+  if (identical(fn, "<-") || identical(fn, "=")) {
+    if (length(args) != 2L || !is.symbol(args[[1L]]))
+      stop("Unsupported assignment in metadata.")
+    return(.safe_eval_meta(args[[2L]]))
+  }
+
+  if (identical(fn, "list") || identical(fn, "c")) {
+    vals <- lapply(args, .safe_eval_meta)
+    nms  <- names(args)
+    if (identical(fn, "list")) {
+      names(vals) <- nms
+      return(vals)
+    }
+    return(do.call("c", c(vals, use.names = !is.null(nms) && any(nzchar(nms)))))
+  }
+
+  if (identical(fn, "-") && length(args) == 1L) {
+    val <- .safe_eval_meta(args[[1L]])
+    if (!is.numeric(val) || length(val) != 1L)
+      stop("Unary minus in metadata only supports numeric scalars.")
+    return(-val)
+  }
+
+  stop(sprintf("Unsupported call in metadata: %s", fn))
+}
+
 .extract_meta <- function(script_path) {
-  lines  <- readLines(script_path, warn = FALSE)
-  cutoff <- grep("if\\s*\\(!exists\\s*\\(", lines)[1]
-  if (is.na(cutoff)) cutoff <- length(lines) + 1L
-  code   <- paste(lines[seq_len(cutoff - 1L)], collapse = "\n")
-  env    <- new.env(parent = globalenv())
-  tryCatch(eval(parse(text = code), envir = env), error = function(e) NULL)
+  exprs <- tryCatch(parse(file = script_path, keep.source = FALSE),
+                    error = function(e) NULL)
+  if (is.null(exprs))
+    return(list(title = tools::file_path_sans_ext(basename(script_path)),
+                vars_spec = NULL))
+
+  title <- NULL
+  vars_spec <- NULL
+  for (expr in as.list(exprs)) {
+    if (!is.call(expr) || length(expr) < 3L) next
+    if (!as.character(expr[[1L]]) %in% c("<-", "=")) next
+    if (!is.symbol(expr[[2L]])) next
+    target <- as.character(expr[[2L]])
+    if (identical(target, "ANALYSIS_TITLE")) {
+      title <- tryCatch(as.character(.safe_eval_meta(expr[[3L]])),
+                        error = function(e) NULL)
+    }
+    if (identical(target, "VARS_SPEC")) {
+      vars_spec <- tryCatch(.safe_eval_meta(expr[[3L]]),
+                            error = function(e) NULL)
+    }
+    if (!is.null(title) && !is.null(vars_spec)) break
+  }
+
   list(
-    title = if (exists("ANALYSIS_TITLE", envir = env, inherits = FALSE))
-              env$ANALYSIS_TITLE
-            else tools::file_path_sans_ext(basename(script_path)),
-    vars_spec = if (exists("VARS_SPEC", envir = env, inherits = FALSE))
-                  env$VARS_SPEC
-                else NULL
+    title = if (!is.null(title) && length(title) == 1L && nzchar(title))
+              title else tools::file_path_sans_ext(basename(script_path)),
+    vars_spec = vars_spec
   )
 }
 
-# Bundled analyses (analysis/templates/*.R), listed by their human title so
-# the coordinator can pick one from a dropdown instead of hunting for an .R
-# file. Returns a named character vector value=path, name=title (empty if the
-# folder isn't found — the Browse fallback still works).
-TEMPLATES_DIR <- normalizePath(file.path(APP_DIR, "..", "..", "analysis", "templates"),
+# Analyses on disk, listed by their human title so the coordinator can pick one
+# from a dropdown instead of hunting for an .R file. Both the researcher's own
+# scripts (analysis/*.R) and the bundled templates (analysis/templates/*.R) are
+# offered: dropping a script in the analysis folder is the obvious way to "add
+# an analysis", and it should show up without editing anything here. Returns a
+# named character vector value=path, name=title (empty if neither folder exists
+# — the Browse fallback still works).
+ANALYSIS_DIR  <- normalizePath(file.path(APP_DIR, "..", "..", "analysis"),
                                mustWork = FALSE)
+TEMPLATES_DIR <- file.path(ANALYSIS_DIR, "templates")
 .scan_templates <- function() {
-  if (!dir.exists(TEMPLATES_DIR)) return(character(0))
-  files <- sort(list.files(TEMPLATES_DIR, pattern = "\\.R$", full.names = TRUE))
+  dirs  <- Filter(dir.exists, c(ANALYSIS_DIR, TEMPLATES_DIR))
+  files <- unlist(lapply(dirs, function(d)
+    list.files(d, pattern = "\\.R$", full.names = TRUE)), use.names = FALSE)
   if (!length(files)) return(character(0))
   titles <- vapply(files, function(f)
     tryCatch(.extract_meta(f)$title,
              error = function(e) tools::file_path_sans_ext(basename(f))),
     character(1))
-  setNames(files, titles)
+  out <- setNames(files, titles)
+  out[order(names(out))]
 }
 ANALYSIS_TEMPLATES <- .scan_templates()
 
@@ -774,6 +844,37 @@ server <- function(input, output, session) {
            character(1))
   })
 
+  .log_study_event <- function(event, status, detail = NULL,
+                               warnings = character(0), outputs = character(0)) {
+    .append_study_log(list(
+      time        = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
+      event       = event,
+      status      = status,
+      study       = trimws(input$study_name),
+      analysis    = if (!is.null(rv$meta)) rv$meta$title else NULL,
+      sites       = as.list(.site_names()),
+      n_sites     = length(active_sites()),
+      detail      = detail,
+      warnings    = as.list(warnings),
+      suppression = any(grepl("Privacy suppression", warnings, fixed = TRUE)),
+      outputs     = as.list(outputs)
+    ))
+  }
+
+  .require_min_sites <- function(action) {
+    n_sites <- length(active_sites())
+    if (n_sites >= MIN_ACTIVE_SITES) return(TRUE)
+    msg <- sprintf(
+      paste0("Need at least %d registered site(s) before %s. ",
+             "This guard reduces the risk that one hospital's patients dominate ",
+             "the result too closely."),
+      MIN_ACTIVE_SITES, action
+    )
+    showNotification(msg, type = "error", duration = 10)
+    .log_study_event(event = action, status = "blocked_min_sites", detail = msg)
+    FALSE
+  }
+
   # ---- Dynamic app title from script ----------------------------
   output$app_title_ui <- renderUI({
     title <- if (!is.null(rv$meta)) rv$meta$title
@@ -843,12 +944,17 @@ server <- function(input, output, session) {
   output$registrar_status_ui <- renderUI({
     poll()
     alive <- !is.null(registrar_proc) && registrar_proc$is_alive()
+    key_warn <- fed_check_file_perms(KEY_FILE)
+    reg_warn <- reg_check_perms(REG_FILE)
     if (!alive)
       return(div(
         div(class = "sbadge sb-warn", style = "margin-bottom:6px;",
             "Registrar not running"),
         div(class = "note", style = "margin-bottom:6px;",
             "Sites can't join or register until this is running."),
+        if (nzchar(key_warn) || nzchar(reg_warn))
+          div(class = "note", style = "margin-bottom:8px; color:#9A5B0A;",
+              paste(c(key_warn, reg_warn)[nzchar(c(key_warn, reg_warn))], collapse = " ")),
         actionButton("btn_restart_registrar", "Restart registrar",
                      class = "btn-primary btn-sm")))
     tagList(
@@ -858,6 +964,9 @@ server <- function(input, output, session) {
       else
         div(class = "sbadge sb-warn",
             "Tailscale not detected — invites will not be reachable remotely."),
+      if (nzchar(key_warn) || nzchar(reg_warn))
+        div(class = "note", style = "margin-top:8px; color:#9A5B0A;",
+            paste(c(key_warn, reg_warn)[nzchar(c(key_warn, reg_warn))], collapse = " ")),
       div(class = "fp", title = "Read this to a site operator to verify your key",
           paste0("Key fingerprint: ", COORD_FP))
     )
@@ -1122,6 +1231,7 @@ server <- function(input, output, session) {
     if (!length(sites)) {
       showNotification("No sites yet. Invite or add a site first.", type = "warning"); return()
     }
+    if (!.require_min_sites("validation")) return()
     if (is.null(rv$meta) || is.null(rv$meta$vars_spec)) {
       showNotification("Load an analysis script first.", type = "warning"); return()
     }
@@ -1139,13 +1249,18 @@ server <- function(input, output, session) {
     rv$val_txt  <- cap_print(print_validation_report(v))
     rv$outputs  <- NULL   # clear old results so validation tab shows
 
-    if (v$ok)
+    if (v$ok) {
       showNotification("Validation passed. Ready to run analysis.",
                        type = "message")
-    else
+      .log_study_event("validation", "ok")
+    } else {
       showNotification(
         sprintf("%d error(s) found — review the Validation tab.",
                 length(v$errors)), type = "error", duration = 8)
+      .log_study_event("validation", "failed",
+                       detail = paste(v$errors, collapse = " | "),
+                       warnings = v$warnings)
+    }
   })
 
   # ---- Run analysis ---------------------------------------------
@@ -1154,6 +1269,7 @@ server <- function(input, output, session) {
     if (!length(sites)) {
       showNotification("No sites yet. Invite or add a site first.", type = "warning"); return()
     }
+    if (!.require_min_sites("running this analysis")) return()
     if (is.null(rv$meta) || is.null(rv$script_path)) {
       showNotification("Choose an analysis first.", type = "warning"); return()
     }
@@ -1183,6 +1299,7 @@ server <- function(input, output, session) {
           }
         ),
         error = function(e) {
+          .log_study_event("analysis_run", "script_error", detail = conditionMessage(e))
           showNotification(paste("Script error:", conditionMessage(e)),
                            type = "error", duration = 15)
           character(0)
@@ -1210,6 +1327,7 @@ server <- function(input, output, session) {
 
     result <- get_outputs()
     if (length(result) == 0) {
+      .log_study_event("analysis_run", "no_outputs", warnings = warn_msgs)
       showNotification(
         "No outputs were registered. Check the script calls register_output().",
         type = "warning")
@@ -1220,15 +1338,11 @@ server <- function(input, output, session) {
         type = "message")
 
       # Provenance: record what was run, on whom, when — persistently.
-      .append_study_log(list(
-        time        = format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"),
-        study       = trimws(input$study_name),
-        analysis    = rv$meta$title,
-        sites       = as.list(.site_names()),
-        n_sites     = length(sites),
-        suppression = any(grepl("Privacy suppression", warn_msgs)),
-        outputs     = as.list(vapply(result, function(o) o$name, character(1)))
-      ))
+      .log_study_event(
+        "analysis_run", "ok",
+        warnings = warn_msgs,
+        outputs = vapply(result, function(o) o$name, character(1))
+      )
     }
   })
 
