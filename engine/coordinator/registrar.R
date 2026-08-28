@@ -210,7 +210,11 @@ pr$handle("GET", "/i/<sid>", function(req, res, sid) {
     res$status <- 404
     return(list(error = "Invite not found or expired."))
   }
-  wants_json <- identical(req$HTTP_X_FEDSTATS_CLIENT, "site-app")
+  fmt <- if (!is.null(req$args$format) && length(req$args$format)) req$args$format[[1]] else ""
+  typ <- if (!is.null(req$args$type) && length(req$args$type)) req$args$type[[1]] else ""
+  wants_json <- identical(req$HTTP_X_FEDSTATS_CLIENT, "site-app") ||
+                identical(tolower(as.character(fmt)), "invite") ||
+                identical(tolower(as.character(typ)), "json")
   if (isTRUE(wants_json)) return(list(invite = r$invite))
 
   site_name <- if (!is.null(r$name) && nzchar(trimws(r$name))) trimws(r$name) else "this site"

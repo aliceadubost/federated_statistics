@@ -232,7 +232,7 @@ if (!dir.exists(.data_dir))
   # Validate the exact short-link shape directly from the pasted text.
   # This is more robust across platforms than relying on parse_url()'s
   # field normalisation, which caused valid /i/<sid> links to be rejected.
-  full_pat <- paste0("^https?://", host_pat, ":8731/i/[A-Za-z0-9_-]+/?$")
+  full_pat <- paste0("^https?://", host_pat, ":[0-9]{2,5}/i/[A-Za-z0-9_-]+/?(?:\\?.*)?$")
   if (!grepl(full_pat, raw, ignore.case = TRUE))
     stop("Invite links must be the coordinator's short /i/<sid> link.")
 
@@ -729,7 +729,9 @@ server <- function(input, output, session) {
     if (grepl("^https?://", raw, ignore.case = TRUE)) {
       raw <- tryCatch({
         .validate_invite_link(raw)
-        resp <- httr::GET(raw,
+        raw_json <- if (grepl("\\?", raw, fixed = TRUE))
+          paste0(raw, "&format=invite") else paste0(raw, "?format=invite")
+        resp <- httr::GET(raw_json,
                           httr::add_headers(`X-Fedstats-Client` = "site-app"),
                           httr::timeout(8))
         if (httr::status_code(resp) != 200)
