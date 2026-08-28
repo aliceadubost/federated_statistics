@@ -51,10 +51,11 @@ INVITE_TTL_DAYS  <- as.integer(Sys.getenv("FED_INVITE_TTL_DAYS", "7"))
 MIN_ACTIVE_SITES <- max(2L, as.integer(Sys.getenv("FED_MIN_ACTIVE_SITES", "2")))
 RSCRIPT_BIN      <- file.path(R.home("bin"),
                               if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
-FED_TMPDIR       <- if (.Platform$OS.type == "windows")
+FED_TMPDIR       <- if (.Platform$OS.type == "windows") {
                        paste0(Sys.getenv("SystemDrive", "C:"), "/fedstats_rtmp")
-                     else
+                     } else {
                        Sys.getenv("TMPDIR", tempdir())
+                     }
 
 # ---- Coordinator signing key: load existing or create once ----------
 .load_or_create_key <- function() {

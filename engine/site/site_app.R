@@ -40,10 +40,11 @@ suppressPackageStartupMessages({
 .fedstats_ok <- requireNamespace("fedstats", quietly = TRUE) && file.exists(.api_script)
 RSCRIPT_BIN  <- file.path(R.home("bin"),
                           if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
-FED_TMPDIR   <- if (.Platform$OS.type == "windows")
+FED_TMPDIR   <- if (.Platform$OS.type == "windows") {
                   paste0(Sys.getenv("SystemDrive", "C:"), "/fedstats_rtmp")
-                else
+                } else {
                   Sys.getenv("TMPDIR", tempdir())
+                }
 
 # ---- Auto-detect CSV files ------------------------------------------
 # A browser file-input dialog can't be told what folder to open (that's a

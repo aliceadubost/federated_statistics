@@ -49,18 +49,62 @@ cran_pkgs <- if (role == "site") {
     "zip", "writexl")
 }
 
+# Helpers: detect packages that are missing, broken, or built under a
+# different major.minor R version than the current interpreter. Warnings like
+# "package X was built under R 4.5.2" are often harmless, but when an older or
+# mismatched install is actually broken we want to proactively replace it
+# during setup rather than fail later while launching the app.
+.current_r_minor <- function() {
+  parts <- strsplit(R.version$minor, "\\.", fixed = FALSE)[[1]]
+  paste0(R.version$major, ".", parts[1])
+}
+
+.package_built_minor <- function(pkg) {
+  built <- tryCatch(utils::packageDescription(pkg, fields = "Built"),
+                    error = function(e) NA_character_)
+  if (!is.character(built) || length(built) != 1L || !nzchar(built)) return(NA_character_)
+  m <- regmatches(built, regexpr("R [0-9]+\\.[0-9]+", built))
+  if (!length(m) || !nzchar(m)) return(NA_character_)
+  sub("^R ", "", m)
+}
+
+.package_needs_reinstall <- function(pkg) {
+  if (!pkg %in% rownames(installed.packages())) return(TRUE)
+  ok_namespace <- tryCatch(requireNamespace(pkg, quietly = TRUE),
+                           error = function(e) FALSE)
+  if (!ok_namespace) return(TRUE)
+  built_minor <- .package_built_minor(pkg)
+  if (!is.na(built_minor) && !identical(built_minor, .current_r_minor())) return(TRUE)
+  FALSE
+}
+
+.remove_installed_package <- function(pkg) {
+  lib <- tryCatch(find.package(pkg), error = function(e) NULL)
+  if (is.null(lib)) return(invisible(FALSE))
+  lib_root <- dirname(lib)
+  tryCatch(remove.packages(pkg, lib = lib_root),
+           error = function(e) invisible(FALSE))
+  invisible(TRUE)
+}
+
 # ── Step A: CRAN packages ─────────────────────────────────────────────
-need <- cran_pkgs[!cran_pkgs %in% rownames(installed.packages())]
+need <- cran_pkgs[vapply(cran_pkgs, .package_needs_reinstall, logical(1))]
 if (length(need) == 0) {
   cat("  ✓  CRAN packages already installed.\n")
 } else {
+  stale <- need[need %in% rownames(installed.packages())]
+  if (length(stale) > 0) {
+    cat(sprintf("  Reinstalling incompatible or broken packages: %s\n",
+                paste(stale, collapse = ", ")))
+    invisible(lapply(stale, .remove_installed_package))
+  }
   cat(sprintf("  Installing: %s\n", paste(need, collapse = ", ")))
   cat("  (This may take a few minutes on first run...)\n")
   # quiet = FALSE so compilation errors are visible
   install.packages(need, repos = "https://cloud.r-project.org", quiet = FALSE)
 
   # Verify — install.packages() does not throw on failure by default
-  still_missing <- need[!need %in% rownames(installed.packages())]
+  still_missing <- need[vapply(need, .package_needs_reinstall, logical(1))]
   if (length(still_missing) > 0) {
     cat("\n  ✗  Could not install:", paste(still_missing, collapse = ", "), "\n\n")
     cat("  On Linux, missing system libraries are the most common cause.\n")
@@ -96,6 +140,28 @@ pkg_path <- normalizePath(file.path(getwd(), "fedstats"), mustWork = FALSE)
   if (!file.exists(meta)) return(NA)
   file.mtime(meta)
 }
+.installed_exports <- function(lib) {
+  ns <- file.path(lib, "NAMESPACE")
+  if (!file.exists(ns)) return(character(0))
+  lines <- tryCatch(readLines(ns, warn = FALSE), error = function(e) character(0))
+  hits <- sub("^export\\(([^)]+)\\)$", "\\1", grep("^export\\([^)]+\\)$", lines, value = TRUE))
+  unique(trimws(hits))
+}
+.fedstats_required_exports <- function(role) {
+  common <- c("fed_keypair", "fed_fingerprint", "fed_check_file_perms",
+              "fed_register_message", "fed_sign", "fed_invite_parse")
+  if (role == "site") {
+    unique(c(common, "fed_bind_host", "fed_harden_file", "fed_ct_equal"))
+  } else {
+    unique(c(common, "fed_advertised_host", "fed_friendly_http_error",
+             "fed_sid", "fed_token", "fed_invite_create", "fed_validate"))
+  }
+}
+.fedstats_exports_ok <- function(lib, role) {
+  req <- .fedstats_required_exports(role)
+  got <- .installed_exports(lib)
+  length(req) > 0 && all(req %in% got)
+}
 
 # find.package() locates the package WITHOUT loading it. requireNamespace()
 # would load it, and on Windows install.packages() then cannot overwrite a DLL
@@ -107,12 +173,27 @@ src_time  <- .newest_source(pkg_path)
 inst_time <- if (fedstats_installed) .installed_build_time(fedstats_lib) else NA
 fedstats_stale <- fedstats_installed && !is.na(src_time) && !is.na(inst_time) &&
                   src_time > inst_time
+fedstats_built_minor <- if (fedstats_installed) .package_built_minor("fedstats") else NA_character_
+fedstats_built_mismatch <- fedstats_installed && !is.na(fedstats_built_minor) &&
+                           !identical(fedstats_built_minor, .current_r_minor())
+fedstats_exports_ok <- fedstats_installed && .fedstats_exports_ok(fedstats_lib, role)
+fedstats_broken <- fedstats_installed &&
+                   !tryCatch(requireNamespace("fedstats", quietly = TRUE),
+                             error = function(e) FALSE)
 
-if (fedstats_installed && !fedstats_stale) {
+if (fedstats_installed && !fedstats_stale && !fedstats_built_mismatch &&
+    fedstats_exports_ok && !fedstats_broken) {
   cat("  ✓  fedstats already installed and up to date.\n")
 } else {
   if (fedstats_stale)
     cat("  fedstats is out of date (the engine has changed since it was installed).\n")
+  if (fedstats_built_mismatch)
+    cat(sprintf("  fedstats was built for R %s, but this machine is running R %s.\n",
+                fedstats_built_minor, .current_r_minor()))
+  if (fedstats_installed && !fedstats_exports_ok)
+    cat("  fedstats is missing exported functions required by this version of the app.\n")
+  if (fedstats_broken)
+    cat("  fedstats is installed but cannot be loaded correctly.\n")
   cat(sprintf("  Installing fedstats from: %s\n", pkg_path))
 
   if (!dir.exists(pkg_path)) {
@@ -136,9 +217,21 @@ if (fedstats_installed && !fedstats_stale) {
     }
   }
 
+  if (fedstats_installed) {
+    cat("  Removing old fedstats installation first.\n")
+    .remove_installed_package("fedstats")
+  }
   install.packages(pkg_path, repos = NULL, type = "source")
 
-  if (!requireNamespace("fedstats", quietly = TRUE)) {
+  fedstats_ok <- tryCatch(requireNamespace("fedstats", quietly = TRUE),
+                          error = function(e) FALSE)
+  fedstats_lib_new <- tryCatch(find.package("fedstats"), error = function(e) NULL)
+  exports_ok_new <- !is.null(fedstats_lib_new) && .fedstats_exports_ok(fedstats_lib_new, role)
+  built_ok_new <- is.null(fedstats_lib_new) || {
+    built_minor <- .package_built_minor("fedstats")
+    is.na(built_minor) || identical(built_minor, .current_r_minor())
+  }
+  if (!fedstats_ok || !exports_ok_new || !built_ok_new) {
     cat("  ✗  fedstats installation failed.\n")
     cat("  Try running this manually in R:\n")
     cat(sprintf('    install.packages("%s", repos = NULL, type = "source")\n', pkg_path))
