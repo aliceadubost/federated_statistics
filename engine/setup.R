@@ -73,10 +73,46 @@ if (length(need) == 0) {
 }
 
 # ── Step B: fedstats (local package) ─────────────────────────────────
-if (requireNamespace("fedstats", quietly = TRUE)) {
-  cat("  ✓  fedstats already installed.\n")
+# "Installed" is not the same as "up to date". fedstats ships with the engine,
+# so the two must always match: the moment the engine calls a function argument
+# an older fedstats doesn't have, the site server dies with an obscure error
+# (e.g. "unused argument (min_cell = MIN_CELL)") and never registers, so the
+# coordinator just sees a site that never connects.
+#
+# A version check cannot catch this — DESCRIPTION's Version rarely changes
+# between commits. Compare timestamps instead: if any source file is newer than
+# the installed copy, reinstall. Git checkouts and unzipped kits both refresh
+# the source mtimes, so this fires exactly when it should.
+pkg_path <- normalizePath(file.path(getwd(), "fedstats"), mustWork = FALSE)
+
+.newest_source <- function(path) {
+  if (!dir.exists(path)) return(NA)
+  files <- list.files(path, recursive = TRUE, full.names = TRUE)
+  if (!length(files)) return(NA)
+  max(file.mtime(files))
+}
+.installed_build_time <- function(lib) {
+  meta <- file.path(lib, "Meta", "package.rds")
+  if (!file.exists(meta)) return(NA)
+  file.mtime(meta)
+}
+
+# find.package() locates the package WITHOUT loading it. requireNamespace()
+# would load it, and on Windows install.packages() then cannot overwrite a DLL
+# that is in use ("cannot remove prior installation") — which would make the
+# reinstall below fail on exactly the machines that need it most.
+fedstats_lib       <- tryCatch(find.package("fedstats"), error = function(e) NULL)
+fedstats_installed <- !is.null(fedstats_lib)
+src_time  <- .newest_source(pkg_path)
+inst_time <- if (fedstats_installed) .installed_build_time(fedstats_lib) else NA
+fedstats_stale <- fedstats_installed && !is.na(src_time) && !is.na(inst_time) &&
+                  src_time > inst_time
+
+if (fedstats_installed && !fedstats_stale) {
+  cat("  ✓  fedstats already installed and up to date.\n")
 } else {
-  pkg_path <- normalizePath(file.path(getwd(), "fedstats"), mustWork = FALSE)
+  if (fedstats_stale)
+    cat("  fedstats is out of date (the engine has changed since it was installed).\n")
   cat(sprintf("  Installing fedstats from: %s\n", pkg_path))
 
   if (!dir.exists(pkg_path)) {

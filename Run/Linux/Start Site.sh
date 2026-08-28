@@ -135,3 +135,4 @@ Rscript -e "shiny::runApp('engine/site/site_app.R', launch.browser = TRUE)"
 
 echo ""
 echo "  Interface closed."
+exit 0

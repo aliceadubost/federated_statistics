@@ -113,4 +113,4 @@ Rscript -e "shiny::runApp('engine/site/site_app.R', launch.browser = TRUE)"
 
 echo ""
 echo "  Interface closed."
-read -rp "  Press Enter to close this window..."
+exit 0

@@ -104,4 +104,4 @@ Rscript -e "shiny::runApp('engine/coordinator/coordinator_app.R', launch.browser
 
 echo ""
 echo "  Coordinator stopped."
-read -rp "  Press Enter to close this window..."
+exit 0

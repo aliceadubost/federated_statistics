@@ -73,7 +73,7 @@ reg_normalize_row <- function(r) {
     sid = NA_character_, name = "", study = "", token = NA_character_,
     site_addr = NULL, site_pk = NULL, invite_state = "issued",
     conn_status = "unknown", created_at = NA_integer_, exp = NA_integer_,
-    registered_at = NULL, last_seen = NULL, pending = NULL,
+    joined_at = NULL, registered_at = NULL, last_seen = NULL, pending = NULL,
     invite = NA_character_  # full invite text, so the registrar can serve
                              # it back at a short link (/i/<sid>) instead of
                              # the operator having to paste the whole thing
@@ -181,6 +181,42 @@ reg_is_revoked <- function(reg, token) {
   isTRUE(token %in% reg$revoked)
 }
 
+reg_mark_joined <- function(reg, sid, token, site_pk, now = as.integer(Sys.time())) {
+  now <- as.integer(now)
+  deny <- function(status, msg)
+    list(status = status, body = list(error = msg), reg = reg, changed = FALSE)
+  ok <- function(msg, changed = TRUE)
+    list(status = 200L, body = list(status = "ok", message = msg),
+         reg = reg, changed = changed)
+
+  r <- reg$sites[[sid]]
+  if (is.null(r)) return(deny(404L, "Unknown invite."))
+  if (is.na(r$token) || !fedstats::fed_ct_equal(token, r$token))
+    return(deny(401L, "Invalid token for this invite."))
+  if (reg_is_revoked(reg, token) || identical(r$invite_state, "revoked"))
+    return(deny(403L, "This invite has been revoked."))
+  if (!is.na(r$exp) && now >= r$exp) {
+    reg$sites[[sid]]$invite_state <- "expired"
+    return(list(status = 403L, body = list(error = "This invite has expired."),
+                reg = reg, changed = TRUE))
+  }
+  if (identical(r$invite_state, "expired"))
+    return(deny(403L, "This invite has expired."))
+  if (!is.null(r$site_pk) && !identical(r$site_pk, site_pk))
+    return(list(status = 409L,
+                body = list(error = paste0(
+                  "A different host already accepted this invite. ",
+                  "Awaiting coordinator approval.")),
+                reg = reg, changed = FALSE))
+
+  r$site_pk <- site_pk
+  if (is.null(r$joined_at)) r$joined_at <- now
+  if (!identical(r$conn_status, "registered"))
+    r$conn_status <- "joined"
+  reg$sites[[sid]] <- r
+  ok("Joined.")
+}
+
 # Approve a held different-identity registration (UI action): adopt the
 # pending identity and consume.
 reg_approve_pending <- function(reg, sid, now = as.integer(Sys.time())) {
@@ -259,12 +295,18 @@ reg_register <- function(reg, sid, token, site_addr, site_pk,
 
   switch(r$invite_state,
     "issued" = {
+      if (identical(r$conn_status, "joined") &&
+          !is.null(r$site_pk) &&
+          !identical(r$site_pk, site_pk)) {
+        hold_pending(reg, "invite was already accepted by another host")
+      } else {
       # enter in_use by recording identity, then consume on success
-      reg$sites[[sid]]$invite_state <- "in_use"
-      reg$sites[[sid]]$site_addr    <- site_addr
-      reg$sites[[sid]]$site_pk      <- site_pk
-      reg <- consume(reg)
-      ok("Registered.")
+        reg$sites[[sid]]$invite_state <- "in_use"
+        reg$sites[[sid]]$site_addr    <- site_addr
+        reg$sites[[sid]]$site_pk      <- site_pk
+        reg <- consume(reg)
+        ok("Registered.")
+      }
     },
     "in_use" = {
       if (same_identity(r)) { reg <- consume(reg); ok("Registered.") }

@@ -135,4 +135,4 @@ echo.
 
 echo.
 echo   Interface closed.
-pause
+exit /b 0

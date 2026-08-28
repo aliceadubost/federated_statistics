@@ -18,12 +18,32 @@ suppressPackageStartupMessages({
   library(jsonlite)
 })
 
+# Track attached browser sessions so closing the last Site tab/window can
+# stop the Shiny app and let the launcher terminal exit too.
+.active_sessions <- 0L
+.session_epoch   <- 0L
+.schedule_shutdown_if_idle <- function(delay_s = 1.5) {
+  .session_epoch <<- .session_epoch + 1L
+  epoch <- .session_epoch
+  later::later(function() {
+    if (.active_sessions <= 0L && identical(.session_epoch, epoch)) {
+      try(shiny::stopApp(), silent = TRUE)
+    }
+  }, delay = delay_s)
+}
+
 # shiny::runApp() sets cwd to the app directory (engine/site/).
 # Navigate up two levels to reach the project root.
 .app_root    <- normalizePath(file.path(getwd(), "..", ".."))
 .api_script  <- file.path(.app_root, "engine", "site", "api_server.R")
 .config_file <- file.path(.app_root, "engine", "site", "site_config.json")
 .fedstats_ok <- requireNamespace("fedstats", quietly = TRUE) && file.exists(.api_script)
+RSCRIPT_BIN  <- file.path(R.home("bin"),
+                          if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
+FED_TMPDIR   <- if (.Platform$OS.type == "windows")
+                  paste0(Sys.getenv("SystemDrive", "C:"), "/fedstats_rtmp")
+                else
+                  Sys.getenv("TMPDIR", tempdir())
 
 # ---- Auto-detect CSV files ------------------------------------------
 # A browser file-input dialog can't be told what folder to open (that's a
@@ -112,34 +132,108 @@ if (!dir.exists(.data_dir))
   if (.fedstats_ok) try(fedstats::fed_harden_file(.config_file), silent = TRUE)
 }
 
+.clear_config <- function() {
+  if (file.exists(.config_file)) unlink(.config_file, force = TRUE)
+  invisible(TRUE)
+}
+
 .config_perm_warning <- function() {
   if (!.fedstats_ok || !file.exists(.config_file)) return("")
   tryCatch(fedstats::fed_check_file_perms(.config_file),
            error = function(e) "")
 }
 
+.check_saved_membership <- function(cfg) {
+  if (is.null(cfg) || is.null(cfg$coord) || is.null(cfg$sid) || is.null(cfg$token)) {
+    return(list(state = "none", message = NULL, cfg = NULL))
+  }
+  url <- paste0("http://", cfg$coord, "/site-status/", utils::URLencode(cfg$sid, reserved = TRUE))
+  tryCatch({
+    r <- httr::GET(url,
+                   httr::add_headers(Authorization = paste("Bearer", cfg$token)),
+                   httr::timeout(4))
+    sc <- httr::status_code(r)
+    body <- tryCatch(httr::content(r, as = "parsed"), error = function(e) list())
+    if (sc == 200L) {
+      if (!is.null(body$name) && nzchar(body$name)) cfg$site_name <- body$name
+      if (!is.null(body$study) && nzchar(body$study)) cfg$study <- body$study
+      return(list(state = "active", message = NULL, cfg = cfg))
+    }
+    if (sc %in% c(403L, 404L)) {
+      msg <- if (!is.null(body$message) && nzchar(body$message)) body$message else
+        "This saved study access is no longer active."
+      return(list(state = "inactive", message = msg, cfg = NULL))
+    }
+    list(state = "unknown", message = NULL, cfg = cfg)
+  }, error = function(e) list(state = "unknown", message = NULL, cfg = cfg))
+}
+
+.announce_joined <- function(cfg) {
+  if (is.null(cfg) || is.null(cfg$coord) || is.null(cfg$sid) ||
+      is.null(cfg$token) || is.null(cfg$site_pub) || is.null(cfg$site_priv)) {
+    return(list(ok = FALSE, status = "invalid", message = "Missing site configuration."))
+  }
+  ts  <- as.integer(Sys.time())
+  msg <- fedstats::fed_register_message(cfg$sid, "", cfg$site_pub, ts)
+  sig <- fedstats::fed_sign(msg, cfg$site_priv)
+  body <- jsonlite::toJSON(list(sid = cfg$sid, site_pk = cfg$site_pub,
+                                ts = ts, sig = sig),
+                           auto_unbox = TRUE)
+  url <- paste0("http://", cfg$coord, "/site-joined")
+  tryCatch({
+    r <- httr::POST(url,
+                    httr::add_headers(Authorization = paste("Bearer", cfg$token),
+                                      `Content-Type` = "application/json"),
+                    body = body, encode = "raw", httr::timeout(6))
+    sc <- httr::status_code(r)
+    parsed <- tryCatch(httr::content(r, as = "parsed"), error = function(e) list())
+    if (sc == 200L) {
+      list(ok = TRUE, status = "ok", message = "Joined.")
+    } else if (sc == 403L) {
+      list(ok = FALSE, status = "revoked",
+           message = "The coordinator has revoked this site's access.")
+    } else if (sc == 404L) {
+      list(ok = FALSE, status = "inactive",
+           message = "This invite is no longer active.")
+    } else {
+      list(ok = FALSE, status = "retry",
+           message = if (!is.null(parsed$error)) as.character(parsed$error)
+                     else sprintf("Coordinator returned HTTP %d.", sc))
+    }
+  }, error = function(e) {
+    list(ok = FALSE, status = "retry", message = conditionMessage(e))
+  })
+}
+
+.stop_site_process <- function(proc, wait_s = 3) {
+  if (is.null(proc)) return(invisible(NULL))
+  if (!proc$is_alive()) return(invisible(proc))
+  try(proc$interrupt(), silent = TRUE)
+  t0 <- Sys.time()
+  while (proc$is_alive() && as.numeric(Sys.time() - t0, units = "secs") < wait_s)
+    Sys.sleep(0.05)
+  if (proc$is_alive())
+    try(proc$kill(), silent = TRUE)
+  invisible(proc)
+}
+
 .validate_invite_link <- function(raw) {
-  parsed <- tryCatch(httr::parse_url(raw), error = function(e) NULL)
-  if (is.null(parsed) || is.null(parsed$scheme) || is.null(parsed$hostname))
-    stop("That invite link is malformed.")
-
-  scheme <- tolower(parsed$scheme)
-  host   <- tolower(parsed$hostname)
-  path   <- if (!is.null(parsed$path)) parsed$path else ""
-  port   <- if (!is.null(parsed$port)) parsed$port else ""
-
+  raw <- trimws(as.character(raw))
   allow_local <- identical(Sys.getenv("FED_ALLOW_LOCAL_INVITE_LINK", "0"), "1")
-  host_ok <- grepl("\\.ts\\.net$", host) || grepl("^100\\.[0-9]+\\.[0-9]+\\.[0-9]+$", host)
-  local_ok <- allow_local && host %in% c("localhost", "127.0.0.1")
+  host_pat <- if (allow_local)
+    "(?:[A-Za-z0-9.-]+\\.ts\\.net|100(?:\\.[0-9]{1,3}){3}|localhost|127\\.0\\.0\\.1)"
+  else
+    "(?:[A-Za-z0-9.-]+\\.ts\\.net|100(?:\\.[0-9]{1,3}){3})"
 
-  if (!scheme %in% c("http", "https"))
+  if (!grepl("^https?://", raw, ignore.case = TRUE))
     stop("Invite links must use http:// or https://.")
-  if (!(host_ok || local_ok))
-    stop("For safety, invite links must point to the coordinator on Tailscale.")
-  if (!grepl("^/i/[A-Za-z0-9_-]+/?$", path))
+
+  # Validate the exact short-link shape directly from the pasted text.
+  # This is more robust across platforms than relying on parse_url()'s
+  # field normalisation, which caused valid /i/<sid> links to be rejected.
+  full_pat <- paste0("^https?://", host_pat, ":8731/i/[A-Za-z0-9_-]+/?$")
+  if (!grepl(full_pat, raw, ignore.case = TRUE))
     stop("Invite links must be the coordinator's short /i/<sid> link.")
-  if (nzchar(port) && !identical(port, "8731"))
-    stop("Invite links must use the coordinator's registrar port 8731.")
 
   raw
 }
@@ -224,6 +318,16 @@ ui <- fluidPage(
     .join-box { background:#FCFDFF; border:1px solid var(--line); border-radius:14px;
                 padding:22px 24px; margin:14px 0;
                 box-shadow:0 1px 3px rgba(15,27,45,.04); }
+    .status-box { background:#FFF8E8; border-left:4px solid #E0A32A;
+                  border-radius:0 10px 10px 0; padding:14px 18px; margin:14px 0 18px 0;
+                  font-size:.96rem; color:#7A4D00; }
+    .joined-box { background:#F3FBF5; border-left:4px solid #50C878;
+                  border-radius:0 10px 10px 0; padding:16px 18px; margin:14px 0;
+                  color:#146C43; }
+    .joined-title { font-size:1.05rem; font-weight:800; margin-bottom:6px; color:#1E6A46; }
+    .joined-sub { color:#315B47; }
+    .muted-link { color:var(--brand-deep); font-size:.92rem; }
+    .mini-note { color:var(--ink-muted); font-size:.92rem; margin-top:8px; }
     .join-status { font-size:.95rem; color:var(--brand-deep); margin-top:8px; }
     .sec-lbl  { font-weight:800; font-size:.88rem; color:var(--ink-muted);
                 text-transform:uppercase; letter-spacing:.08em; margin:28px 0 10px 0; }
@@ -275,15 +379,12 @@ ui <- fluidPage(
           actionLink("show_help_site", "How this works", style = "font-size:.85rem;"))),
 
   uiOutput("warn_ui"),
+  uiOutput("status_help_ui"),
 
   # ---- Join a study (invite flow) --------------------------------
-  div(class = "sec-lbl", "Join a study"),
+  uiOutput("join_label_ui"),
   uiOutput("joined_ui"),
-  div(class = "join-box",
-      tags$textarea(id = "invite", placeholder = "Paste your invite or invite link here"),
-      div(style = "margin-top:8px;",
-          actionButton("btn_join", "Join", class = "btn btn-primary btn-sm")),
-      uiOutput("join_status_ui")),
+  uiOutput("join_box_ui"),
 
   uiOutput("address_ui"),
 
@@ -298,25 +399,35 @@ ui <- fluidPage(
     column(12, uiOutput("action_btn_ui"), style = "margin-top:10px;")
   ),
 
-  hr(),
-  div(class = "sec-lbl", "Log"),
-  verbatimTextOutput("server_log")
+  uiOutput("details_toggle_ui"),
+  uiOutput("log_ui")
 )
 
 # -----------------------------------------------------------------------
 # Server
 # -----------------------------------------------------------------------
 server <- function(input, output, session) {
+  .active_sessions <<- .active_sessions + 1L
+  .session_epoch <<- .session_epoch + 1L
+  session$onSessionEnded(function() {
+    proc <- isolate(rv$proc)
+    .stop_site_process(proc)
+    .active_sessions <<- max(0L, .active_sessions - 1L)
+    if (.active_sessions <= 0L) .schedule_shutdown_if_idle()
+  })
 
   # Reactive so Refresh can re-scan data/ without restarting the app.
   csv_files_rv <- reactiveVal(.scan_csvs())
+  initial_cfg  <- .load_config()
 
   rv <- reactiveValues(
     proc         = NULL,
     log          = character(0),
     status       = "stopped",   # "stopped" | "starting" | "running"
-    config       = .load_config(),
+    config       = initial_cfg,
+    config_state = if (is.null(initial_cfg)) "none" else "checking",
     join_status  = NULL,        # text shown under the Join box
+    need_join_notice = FALSE,   # notify coordinator that invite was accepted
     need_register = FALSE,      # register once the server reaches "running"
     ts_ip        = .get_ts_ip(),# live Tailscale IP, refreshed below
     port         = NA_integer_, # chosen automatically at Start Server time
@@ -325,8 +436,69 @@ server <- function(input, output, session) {
     # FEDSTAT2 form. When the operator pastes a short link, the text box holds
     # a URL, not an invite — so the confirm handler must re-use what the link
     # resolved to, not re-read the box.
-    pending_invite = NULL
+    pending_invite = NULL,
+    show_join_form = is.null(initial_cfg),
+    show_details   = FALSE
   )
+
+  .drop_saved_membership <- function(message = NULL) {
+    .clear_config()
+    rv$config <- NULL
+    rv$config_state <- "none"
+    rv$show_join_form <- TRUE
+    rv$need_register <- FALSE
+    rv$join_status <- if (!is.null(message) && nzchar(message))
+      paste0(message, " Paste a new invite to join again.")
+    else
+      "Paste a new invite to join again."
+  }
+
+  observe({
+    cfg <- isolate(rv$config)
+    if (is.null(cfg) || !identical(isolate(rv$config_state), "checking")) return()
+    chk <- .check_saved_membership(cfg)
+    if (identical(chk$state, "active")) {
+      rv$config <- chk$cfg
+      rv$config_state <- "active"
+      .save_config(rv$config)
+    } else if (identical(chk$state, "inactive")) {
+      .drop_saved_membership(chk$message)
+    } else {
+      rv$config <- chk$cfg
+      rv$config_state <- "saved"
+    }
+  })
+
+  membership_timer <- reactiveTimer(10000)
+  observe({
+    membership_timer()
+    cfg <- isolate(rv$config)
+    if (is.null(cfg) || identical(isolate(rv$status), "starting")) return()
+    if (isTRUE(isolate(rv$need_join_notice))) {
+      ann <- .announce_joined(cfg)
+      if (isTRUE(ann$ok)) {
+        rv$need_join_notice <- FALSE
+      } else if (identical(ann$status, "revoked") || identical(ann$status, "inactive")) {
+        .drop_saved_membership(ann$message)
+        return()
+      }
+    }
+    chk <- .check_saved_membership(cfg)
+    if (identical(chk$state, "active")) {
+      rv$config <- chk$cfg
+      rv$config_state <- "active"
+    } else if (identical(chk$state, "inactive")) {
+      proc <- isolate(rv$proc)
+      if (!is.null(proc) && proc$is_alive()) {
+        .stop_site_process(proc)
+        rv$log <- c(rv$log, "\n--- access revoked by coordinator ---")
+      }
+      rv$status <- "stopped"
+      rv$proc   <- NULL
+      .drop_saved_membership(chk$message)
+      session$sendCustomMessage("scrollLog", list())
+    }
+  })
 
   # Re-check Tailscale every few seconds so connecting *after* this app is
   # already open is picked up without restarting it.
@@ -377,7 +549,11 @@ server <- function(input, output, session) {
           # Auto-register once the server is confirmed up, if we joined via an invite.
           if (isolate(rv$need_register) && !is.null(isolate(rv$config))) {
             msg <- .do_register(isolate(rv$config), port, isolate(rv$ts_ip))
-            rv$join_status <- msg
+            if (identical(msg, "Coordinator rejected: invite expired or revoked.")) {
+              .drop_saved_membership("The coordinator has revoked this site's access.")
+            } else {
+              rv$join_status <- msg
+            }
             rv$log <- c(rv$log, paste0("\n--- ", msg, " ---"))
             rv$need_register <- FALSE
           }
@@ -431,20 +607,82 @@ server <- function(input, output, session) {
   })
 
   # ---- Joined-study banner ---------------------------------------
+  .site_label <- function(cfg) {
+    if (is.null(cfg)) return("this site")
+    nm <- if (!is.null(cfg$site_name)) trimws(as.character(cfg$site_name)) else ""
+    if (nzchar(nm)) nm else "this site"
+  }
+
+  output$join_label_ui <- renderUI({
+    if (identical(rv$status, "running")) return(NULL)
+    lbl <- if (!is.null(rv$config) && !isTRUE(rv$show_join_form)) "Current study"
+           else "Join a study"
+    div(class = "sec-lbl", lbl)
+  })
+
   output$joined_ui <- renderUI({
+    if (identical(rv$status, "running")) return(NULL)
     cfg <- rv$config
     if (is.null(cfg)) return(NULL)
-    fp <- if (.fedstats_ok && !is.null(cfg$coord_pk))
-            fedstats::fed_fingerprint(cfg$coord_pk) else "?"
-    div(class = "privacy",
-        strong(paste0("Joined study: ", cfg$study)),
-        br(),
-        sprintf("Coordinator: %s   ·   key fingerprint: %s", cfg$coord, fp))
+    box_class <- if (identical(rv$config_state, "saved")) "addr" else "joined-box"
+    title <- if (identical(rv$config_state, "saved"))
+      paste0("Saved study setup: ", cfg$study)
+    else
+      paste0("Joined study: ", cfg$study)
+    subtxt <- if (identical(rv$config_state, "saved")) {
+      if (nzchar(.site_label(cfg)) && !identical(.site_label(cfg), "this site"))
+        paste0("This computer was previously set up for ", .site_label(cfg),
+               ". We will confirm the connection again when the coordinator is reachable.")
+      else
+        "This computer was previously linked to this study. We will confirm the connection again when the coordinator is reachable."
+    } else if (nzchar(.site_label(cfg)) && !identical(.site_label(cfg), "this site")) {
+      paste0("This computer is set up for ", .site_label(cfg), ".")
+    } else {
+      "This computer is already linked to this study."
+    }
+    tagList(
+      div(class = box_class,
+          div(class = "joined-title", title),
+          div(class = "joined-sub", subtxt)),
+      if (!isTRUE(rv$show_join_form))
+        div(style = "margin-top:-4px; margin-bottom:12px;",
+            actionLink("btn_change_study", "Use a different invite", class = "muted-link"))
+    )
   })
 
   output$join_status_ui <- renderUI({
+    if (identical(rv$status, "running")) return(NULL)
     if (is.null(rv$join_status)) return(NULL)
     div(class = "join-status", rv$join_status)
+  })
+
+  output$status_help_ui <- renderUI({
+    cfg <- rv$config
+    msg <- switch(rv$status,
+      stopped = if (is.null(cfg))
+        "This server is not running yet. First join the study, then choose your data file and click Start Server."
+      else if (identical(rv$config_state, "saved"))
+        "A saved study setup was found on this computer. If that study is still active, click Start Server. If not, use a different invite."
+      else
+        "You are already joined to the study, but sharing is currently off. Choose your data file if needed, then click Start Server so the coordinator can connect.",
+      starting =
+        "The server is starting. Keep this window open while it finishes connecting.",
+      running  =
+        "Connected. You can minimize this window, but keep it open while the coordinator works."
+    )
+    box_class <- if (identical(rv$status, "running")) "privacy" else "status-box"
+    div(class = box_class, msg)
+  })
+
+  output$join_box_ui <- renderUI({
+    if (!is.null(rv$config) && !isTRUE(rv$show_join_form)) {
+      return(uiOutput("join_status_ui"))
+    }
+    div(class = "join-box",
+        tags$textarea(id = "invite", placeholder = "Paste your invite or invite link here"),
+        div(style = "margin-top:8px;",
+            actionButton("btn_join", "Join", class = "btn btn-primary btn-sm")),
+        uiOutput("join_status_ui"))
   })
 
   # ---- "How this works" help modal ------------------------------
@@ -466,6 +704,15 @@ server <- function(input, output, session) {
       easyClose = TRUE, footer = modalButton("Got it")))
   })
 
+  observeEvent(input$btn_change_study, {
+    rv$show_join_form <- TRUE
+    rv$join_status <- "Paste the new invite, then click Join."
+  })
+
+  observeEvent(input$toggle_details, {
+    rv$show_details <- !isTRUE(rv$show_details)
+  })
+
   # ---- Join: parse + verify + pin + save -------------------------
   observeEvent(input$btn_join, {
     if (!.fedstats_ok) {
@@ -481,7 +728,9 @@ server <- function(input, output, session) {
     if (grepl("^https?://", raw, ignore.case = TRUE)) {
       raw <- tryCatch({
         .validate_invite_link(raw)
-        resp <- httr::GET(raw, httr::timeout(8))
+        resp <- httr::GET(raw,
+                          httr::add_headers(`X-Fedstats-Client` = "site-app"),
+                          httr::timeout(8))
         if (httr::status_code(resp) != 200)
           stop("That link didn't return an invite — it may have expired.")
         inv <- httr::content(resp, as = "parsed")$invite
@@ -552,13 +801,28 @@ server <- function(input, output, session) {
     }
 
     cfg <- list(study = p$study, coord = p$coord, sid = p$sid, token = p$tok,
+                site_name = p$name,
                 coord_pk = pr$pk, site_priv = site_priv, site_pub = site_pub)
     .save_config(cfg)
     rv$config <- cfg
+    rv$config_state <- "active"
+    rv$need_join_notice <- TRUE
+    rv$show_join_form <- FALSE
+    rv$show_details <- FALSE
     perm_warn <- .config_perm_warning()
 
+    ann <- .announce_joined(cfg)
+    if (isTRUE(ann$ok)) {
+      rv$need_join_notice <- FALSE
+      rv$join_status <- "Joined. The coordinator can now see that this site is ready to start."
+    } else if (identical(ann$status, "revoked") || identical(ann$status, "inactive")) {
+      .drop_saved_membership(ann$message)
+      return()
+    }
+
     updateTextAreaInput(session, "invite", value = "")
-    rv$join_status <- "Joined. Select your data file (if needed) and click Start Server."
+    if (isTRUE(rv$need_join_notice))
+      rv$join_status <- "Joined on this computer. Choose your data file if needed, then click Start Server."
     showNotification(paste0("Joined study '", cfg$study,
                             "'. Start the server to register."),
                      type = "message", duration = 8)
@@ -569,39 +833,33 @@ server <- function(input, output, session) {
   # ---- Status badge ----------------------------------------------
   output$status_badge <- renderUI({
     lbl <- switch(rv$status,
-      stopped  = "Stopped",
+      stopped  = "Server off",
       starting = "Starting…",
-      running  = "Running"
+      running  = "Ready"
     )
     span(class = paste0("bdg bdg-", rv$status), lbl)
   })
 
   # ---- Address + connected confirmation (shown while running) ----
   output$address_ui <- renderUI({
-    if (rv$status == "stopped") return(NULL)
+    if (rv$status == "stopped" || !isTRUE(rv$show_details)) return(NULL)
     port    <- isolate(rv$port)
     running <- rv$status == "running"
     on_ts   <- nzchar(rv$ts_ip)
     addr    <- if (on_ts) sprintf("http://%s:%d", rv$ts_ip, port)
                else sprintf("http://localhost:%d", port)
     tagList(
-      # Plain-language "you're done" reassurance for a non-technical operator
-      # — the status badge + technical log alone don't say "you can walk away".
-      if (running)
-        div(class = "privacy",
-            strong("✓ You're connected — keep this window open."),
-            br(),
-            "You can minimize it. The coordinator can now run analyses on your ",
-            "data (which never leaves this computer). Click Stop Server, or close ",
-            "this window, when the study session is over."),
       div(class = "addr",
           div(class = "addr-lbl",
-              if (on_ts) "Your address (the coordinator reaches you here)"
-              else "Local address (Tailscale not detected)"),
+              if (on_ts) "Technical details"
+              else "Local-only details"),
           div(class = "addr-url", addr),
           if (!on_ts)
             div(style = "font-size:.82em; color:#666; margin-top:4px;",
-                "The coordinator must be on the same machine or local network."))
+                "The coordinator must be on the same machine or local network."),
+          if (running)
+            div(class = "mini-note",
+                "Only needed for troubleshooting. Most users can ignore this."))
     )
   })
 
@@ -619,7 +877,7 @@ server <- function(input, output, session) {
     # being served instead of an editable picker, so it's clear it's in use.
     if (rv$status != "stopped") {
       return(div(class = "note", style = "margin-top:2px;",
-                 "Serving: ",
+                 strong("Data file: "),
                  strong(if (!is.na(rv$data_name)) rv$data_name else "(your data file)"),
                  tags$span(style = "color:var(--ink-muted);",
                            " — stop the server to change it.")))
@@ -653,6 +911,15 @@ server <- function(input, output, session) {
                    class = "btn btn-danger",
                    style = "min-width:140px; font-size:1em;")
     }
+  })
+
+  output$details_toggle_ui <- renderUI({
+    if ((rv$status == "stopped" && !length(rv$log)) || identical(rv$status, "starting"))
+      return(NULL)
+    div(style = "margin-top:12px;",
+        actionLink("toggle_details",
+                   if (isTRUE(rv$show_details)) "Hide technical details"
+                   else "Show technical details"))
   })
 
   # ---- Start server ----------------------------------------------
@@ -697,6 +964,11 @@ server <- function(input, output, session) {
     env_vars["FED_DATA_FILE"] <- data_path
     env_vars["FED_PORT"]      <- as.character(port)
     env_vars["FED_TOKEN"]     <- token
+    if (.Platform$OS.type == "windows" && !dir.exists(FED_TMPDIR))
+      dir.create(FED_TMPDIR, recursive = TRUE, showWarnings = FALSE)
+    env_vars["TMPDIR"]        <- FED_TMPDIR
+    env_vars["TEMP"]          <- FED_TMPDIR
+    env_vars["TMP"]           <- FED_TMPDIR
 
     rv$log    <- character(0)
     rv$status <- "starting"
@@ -704,7 +976,7 @@ server <- function(input, output, session) {
 
     rv$proc <- tryCatch(
       processx::process$new(
-        "Rscript", args = .api_script,
+        RSCRIPT_BIN, args = .api_script,
         wd     = .app_root,
         env    = env_vars,
         stdout = "|",
@@ -723,7 +995,7 @@ server <- function(input, output, session) {
   observeEvent(input$btn_stop, {
     proc <- rv$proc
     if (!is.null(proc) && proc$is_alive()) {
-      proc$kill()
+      .stop_site_process(proc)
       rv$log <- c(rv$log, "\n--- server stopped by user ---")
     }
     rv$status <- "stopped"
@@ -738,11 +1010,16 @@ server <- function(input, output, session) {
     paste(rv$log, collapse = "\n")
   })
 
-  # ---- Kill subprocess on browser close --------------------------
-  session$onSessionEnded(function() {
-    proc <- isolate(rv$proc)
-    if (!is.null(proc) && proc$is_alive()) proc$kill()
+  output$log_ui <- renderUI({
+    if (!isTRUE(rv$show_details)) return(NULL)
+    tagList(
+      hr(),
+      div(class = "sec-lbl", "Technical details"),
+      uiOutput("address_ui"),
+      verbatimTextOutput("server_log")
+    )
   })
+
 }
 
 shinyApp(ui, server)

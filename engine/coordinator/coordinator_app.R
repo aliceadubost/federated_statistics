@@ -49,6 +49,12 @@ REGISTRAR_SCRIPT <- file.path(APP_DIR, "registrar.R")
 REGISTRAR_PORT   <- as.integer(Sys.getenv("FED_REGISTRAR_PORT", "8731"))
 INVITE_TTL_DAYS  <- as.integer(Sys.getenv("FED_INVITE_TTL_DAYS", "7"))
 MIN_ACTIVE_SITES <- max(2L, as.integer(Sys.getenv("FED_MIN_ACTIVE_SITES", "2")))
+RSCRIPT_BIN      <- file.path(R.home("bin"),
+                              if (.Platform$OS.type == "windows") "Rscript.exe" else "Rscript")
+FED_TMPDIR       <- if (.Platform$OS.type == "windows")
+                       paste0(Sys.getenv("SystemDrive", "C:"), "/fedstats_rtmp")
+                     else
+                       Sys.getenv("TMPDIR", tempdir())
 
 # ---- Coordinator signing key: load existing or create once ----------
 .load_or_create_key <- function() {
@@ -74,15 +80,71 @@ COORD_ADDR <- if (nzchar(COORD_HOST))
   envv["FED_REGISTRY_FILE"]  <- REG_FILE
   envv["FED_REGISTRAR_PORT"] <- as.character(REGISTRAR_PORT)
   envv["FED_INVITE_TTL_DAYS"] <- as.character(INVITE_TTL_DAYS)
-  processx::process$new("Rscript", REGISTRAR_SCRIPT, env = envv, wd = APP_DIR,
+  if (.Platform$OS.type == "windows" && !dir.exists(FED_TMPDIR))
+    dir.create(FED_TMPDIR, recursive = TRUE, showWarnings = FALSE)
+  envv["TMPDIR"] <- FED_TMPDIR
+  envv["TEMP"]   <- FED_TMPDIR
+  envv["TMP"]    <- FED_TMPDIR
+  processx::process$new(RSCRIPT_BIN, REGISTRAR_SCRIPT, env = envv, wd = APP_DIR,
                         stdout = "|", stderr = "|")
+}
+.read_registrar_diag <- function(proc, max_lines = 16L) {
+  if (is.null(proc)) return(NULL)
+  out <- tryCatch(proc$read_output_lines(), error = function(e) character(0))
+  err <- tryCatch(proc$read_error_lines(),  error = function(e) character(0))
+  lines <- tail(c(out, err), max_lines)
+  code  <- tryCatch(proc$get_exit_status(), error = function(e) NULL)
+  list(
+    exit_status = if (is.null(code)) NA_integer_ else as.integer(code),
+    lines = lines
+  )
+}
+.stop_registrar <- function(proc, wait_s = 3) {
+  if (is.null(proc)) return(invisible(NULL))
+  if (!proc$is_alive()) return(invisible(proc))
+  # On Windows, a hard kill can surface native Rscript crash/JIT dialogs.
+  # Try a gentler interrupt first and only force-kill if it refuses to exit.
+  try(proc$interrupt(), silent = TRUE)
+  t0 <- Sys.time()
+  while (proc$is_alive() && as.numeric(Sys.time() - t0, units = "secs") < wait_s)
+    Sys.sleep(0.05)
+  if (proc$is_alive())
+    try(proc$kill(), silent = TRUE)
+  invisible(proc)
+}
+.restart_registrar <- function(retries = 2L, settle_s = 0.8) {
+  if (!is.null(registrar_proc)) .stop_registrar(registrar_proc)
+  last_proc <- NULL
+  for (i in seq_len(max(1L, retries))) {
+    last_proc <- tryCatch(.start_registrar(), error = function(e) NULL)
+    if (is.null(last_proc)) {
+      Sys.sleep(settle_s)
+      next
+    }
+    Sys.sleep(settle_s)
+    if (last_proc$is_alive()) return(last_proc)
+  }
+  last_proc
 }
 registrar_proc <- tryCatch(.start_registrar(), error = function(e) NULL)
 onStop(function() {
-  try(if (!is.null(registrar_proc) && registrar_proc$is_alive())
-        registrar_proc$kill(), silent = TRUE)
+  try(.stop_registrar(registrar_proc), silent = TRUE)
   try(future::plan(future::sequential), silent = TRUE)  # tear down ping workers
 })
+
+# Track live browser sessions so closing the last Coordinator tab/window
+# can stop the Shiny app and let the launcher terminal exit too.
+.active_sessions <- 0L
+.session_epoch   <- 0L
+.schedule_shutdown_if_idle <- function(delay_s = 1.5) {
+  .session_epoch <<- .session_epoch + 1L
+  epoch <- .session_epoch
+  later::later(function() {
+    if (.active_sessions <= 0L && identical(.session_epoch, epoch)) {
+      try(shiny::stopApp(), silent = TRUE)
+    }
+  }, delay = delay_s)
+}
 
 # Warn (in the launcher console) if the registry is world-readable.
 {
@@ -236,31 +298,31 @@ build_mailto_link <- function(subject, body) {
          utils::URLencode(body, reserved = TRUE))
 }
 
-# One ready-to-send message for a brand-new site operator with nothing
-# installed yet: Tailscale (the one unavoidable manual step — nothing can
-# reach a machine that isn't on the tailnet yet), the self-hosted kit link,
-# then the study invite. A repeat operator who already has the software
-# just needs the short invite link (shown separately, above this).
-build_onboarding_message <- function(study, kit_link, invite_link) {
+# One ready-to-send message covering both cases: operators who already
+# have the software and operators who still need to download it. Keep it
+# short and procedural so a clinician can follow it without deciding which
+# branch of instructions applies to them first.
+build_onboarding_message <- function(study, site_name, kit_link, invite_link) {
+  site_line <- if (!is.null(site_name) && nzchar(trimws(site_name)))
+    paste0("Site: ", trimws(site_name), "\n") else ""
   paste(
     sprintf('You\'ve been invited to join the "%s" federated study.', study),
+    site_line,
     "",
-    "STEP 1 - Install Tailscale (one-time, about 2 minutes)",
-    "Download: https://tailscale.com/download",
-    "After installing, wait for an invite from me to join our private network,",
-    "then accept it and sign in.",
+    "1. Connect to Tailscale.",
+    "If you do not have it yet, install it here: https://tailscale.com/download",
+    "Then sign in and accept the private Tailscale network invitation sent by the coordinator.",
     "",
-    "STEP 2 - Get the study software (one-time)",
-    "Once Tailscale is connected, open this link and click the download button:",
+    "2. If you already have the study software, open the Run folder and start the Site app for your computer.",
+    "If you do not have it yet, download it here:",
     kit_link,
-    "Unzip the downloaded file anywhere, then open the \"Start Site\" file for",
-    "your computer (inside the Run folder).",
     "",
-    "STEP 3 - Join the study",
-    "Paste this into the app and click Join:",
+    "3. In the Site app, paste this Join link and click Join:",
     invite_link,
     "",
-    "Then pick your data file and click Start Server. That's it.",
+    "4. Choose your data file if needed, then click Start Server.",
+    "",
+    "Please keep that window open while we run the analysis.",
     sep = "\n"
   )
 }
@@ -741,6 +803,9 @@ ui <- fluidPage(
       # ---- Sites ----
       div(class = "step", "Sites"),
       uiOutput("registrar_status_ui"),
+      div(class = "note", style = "margin:8px 0 10px 0;",
+          strong("Before inviting a site:"), " make sure that collaborator has already been invited to your private Tailscale network. ",
+          "The study invite below only works after they have Tailscale access."),
       div(style = "margin:8px 0;",
           actionButton("btn_invite", "Invite a site",
                        class = "btn-primary btn-sm")),
@@ -784,6 +849,12 @@ ui <- fluidPage(
 # Server
 # ---------------------------------------------------------------
 server <- function(input, output, session) {
+  .active_sessions <<- .active_sessions + 1L
+  .session_epoch <<- .session_epoch + 1L
+  session$onSessionEnded(function() {
+    .active_sessions <<- max(0L, .active_sessions - 1L)
+    if (.active_sessions <= 0L) .schedule_shutdown_if_idle()
+  })
 
   rv <- reactiveValues(
     meta        = NULL,   # list(title, vars_spec)
@@ -795,6 +866,7 @@ server <- function(input, output, session) {
     reg         = reg_load(REG_FILE),  # registered-sites registry (polled)
     ping_status = list(),  # url -> list(ok, checked_at) from the last ping
     pending_revoke_sid = NULL, # sid awaiting confirm in the Revoke dialog
+    registrar_diag = NULL, # last stderr/stdout tail if registrar exits
     phase       = "setup" # "setup" (big, centered) -> "results" (compact),
                           # one-way for the rest of the session
   )
@@ -816,9 +888,13 @@ server <- function(input, output, session) {
     poll()
     rv$reg <- reg_load(REG_FILE)
     # Drain the registrar's pipes so its output buffer never blocks.
-    if (!is.null(registrar_proc) && registrar_proc$is_alive()) {
-      invisible(tryCatch(registrar_proc$read_output_lines(), error = function(e) NULL))
-      invisible(tryCatch(registrar_proc$read_error_lines(),  error = function(e) NULL))
+    if (!is.null(registrar_proc)) {
+      if (registrar_proc$is_alive()) {
+        invisible(tryCatch(registrar_proc$read_output_lines(), error = function(e) NULL))
+        invisible(tryCatch(registrar_proc$read_error_lines(),  error = function(e) NULL))
+      } else if (is.null(rv$registrar_diag)) {
+        rv$registrar_diag <- .read_registrar_diag(registrar_proc)
+      }
     }
   })
 
@@ -952,6 +1028,16 @@ server <- function(input, output, session) {
             "Registrar not running"),
         div(class = "note", style = "margin-bottom:6px;",
             "Sites can't join or register until this is running."),
+        if (!is.null(rv$registrar_diag))
+          div(class = "note", style = "margin-bottom:8px; color:#991B1B;",
+              strong("Last registrar error"),
+              tags$br(),
+              sprintf("Exit status: %s",
+                      if (is.na(rv$registrar_diag$exit_status)) "unknown"
+                      else as.character(rv$registrar_diag$exit_status)),
+              if (length(rv$registrar_diag$lines))
+                tags$pre(style = "margin-top:8px; white-space:pre-wrap;",
+                         paste(rv$registrar_diag$lines, collapse = "\n"))),
         if (nzchar(key_warn) || nzchar(reg_warn))
           div(class = "note", style = "margin-bottom:8px; color:#9A5B0A;",
               paste(c(key_warn, reg_warn)[nzchar(c(key_warn, reg_warn))], collapse = " ")),
@@ -976,14 +1062,15 @@ server <- function(input, output, session) {
   # registrar_proc is the app-level binding; <<- reassigns it so the status
   # poll picks up the new process. Avoids restarting the whole app.
   observeEvent(input$btn_restart_registrar, {
-    try(if (!is.null(registrar_proc) && registrar_proc$is_alive())
-          registrar_proc$kill(), silent = TRUE)
-    registrar_proc <<- tryCatch(.start_registrar(), error = function(e) NULL)
-    if (!is.null(registrar_proc))
+    rv$registrar_diag <- NULL
+    registrar_proc <<- tryCatch(.restart_registrar(), error = function(e) NULL)
+    if (!is.null(registrar_proc) && registrar_proc$is_alive())
       showNotification("Registrar restarted.", type = "message")
-    else
-      showNotification("Could not restart the registrar — check the launcher console.",
+    else {
+      rv$registrar_diag <- .read_registrar_diag(registrar_proc)
+      showNotification("Registrar could not stay running — see the error shown here.",
                        type = "error", duration = 10)
+    }
   })
 
   # ---- Sites table ----------------------------------------------
@@ -1016,11 +1103,27 @@ server <- function(input, output, session) {
         stale     = span(class = "sbadge sb-info", "Stale"),
         offline   = span(class = "sbadge sb-warn", "Offline"))
     }
+    status_caption <- function(r) {
+      if (!is.null(r$pending)) return("awaiting review")
+      if (identical(r$invite_state, "consumed")) return("server available")
+      if (identical(r$conn_status, "joined")) return("server not started yet")
+      if (identical(r$invite_state, "in_use")) return("registration in progress")
+      invite_expiry_label(r$exp, r$invite_state)
+    }
 
     rows <- list()
     if (!is.null(reg)) for (sid in names(reg$sites)) {
       r <- reg$sites[[sid]]
+      state_badge <- if (identical(r$invite_state, "consumed")) {
+        badge("consumed", r$pending)
+      } else if (identical(r$conn_status, "joined")) {
+        span(class = "sbadge sb-info", "Joined")
+      } else {
+        badge(r$invite_state, r$pending)
+      }
       actions <- tagList(
+        if (!is.na(r$invite) && r$invite_state %in% c("issued", "in_use"))
+          act_btn("Show invite", "btn-default", "show_invite_sid", sid),
         if (!is.null(r$pending))
           act_btn("Approve", "btn-success", "approve_sid", sid),
         act_btn("Revoke", "btn-danger", "revoke_sid", sid))
@@ -1032,8 +1135,8 @@ server <- function(input, output, session) {
         tags$td(
           div(class = "site-name", if (nzchar(r$name)) r$name else "(unnamed)"),
           if (!is.null(r$site_addr)) div(class = "site-addr-sub", r$site_addr)),
-        tags$td(badge(r$invite_state, r$pending),
-               { lbl <- invite_expiry_label(r$exp, r$invite_state)
+        tags$td(state_badge,
+               { lbl <- status_caption(r)
                  if (!is.null(lbl)) div(class = "site-addr-sub", lbl) }),
         tags$td(if (!is.null(r$site_addr)) ping_badge(r$site_addr)),
         tags$td(actions))
@@ -1054,6 +1157,9 @@ server <- function(input, output, session) {
       p(class = "note", style = "margin-top:0;",
         "Study: ", strong(trimws(input$study_name)),
         " — change it in the sidebar if that's wrong."),
+      div(class = "note", style = "margin-bottom:12px;",
+          strong("First:"), " invite this collaborator to your private Tailscale network. ",
+          "Then create and send the study invite below."),
       textInput("inv_name", "Site name (label)", placeholder = "e.g. Karolinska"),
       if (!nzchar(COORD_ADDR))
         div(class = "sbadge sb-warn",
@@ -1062,6 +1168,57 @@ server <- function(input, output, session) {
                        actionButton("inv_make", "Create invite", class = "btn-primary")),
       easyClose = TRUE))
   })
+
+  show_invite_modal <- function(r, title = "Invite created") {
+    if (is.null(r)) return(invisible(NULL))
+    site_label <- if (!is.null(r$name) && nzchar(trimws(r$name))) trimws(r$name) else "Site"
+    short_link <- if (nzchar(COORD_ADDR)) sprintf("http://%s/i/%s", COORD_ADDR, r$sid) else ""
+    kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/get", COORD_ADDR) else ""
+    onboarding_msg <- if (nzchar(short_link) && nzchar(kit_link))
+      build_onboarding_message(r$study, site_label, kit_link, short_link) else ""
+    mailto_subject <- sprintf('Join the "%s" federated study', r$study)
+    onboarding_mailto <- if (nzchar(onboarding_msg))
+      build_mailto_link(mailto_subject, onboarding_msg) else ""
+
+    showModal(modalDialog(
+      title = title,
+      p(strong(site_label), " — send the links below. This invite expires in ",
+        strong(paste0(INVITE_TTL_DAYS, " day(s)")), "."),
+      if (nzchar(kit_link)) tagList(
+        div(class = "sec-lbl", paste0("Download Link - ", site_label)),
+        tags$input(id = "kit_link_input", class = "form-control", readonly = NA,
+                   value = kit_link,
+                   style = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92rem;"),
+        div(style = "margin-top:6px; margin-bottom:14px;",
+            tags$button("Copy download link", class = "btn btn-default btn-sm",
+                        onclick = "fedCopy('kit_link_input')"))
+      ),
+      if (nzchar(short_link)) tagList(
+        div(class = "sec-lbl", paste0("Join Link - ", site_label)),
+        tags$input(id = "invite_link", class = "form-control", readonly = NA,
+                   value = short_link,
+                   style = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92rem;"),
+        div(style = "margin-top:6px; margin-bottom:14px;",
+            tags$button("Copy link", class = "btn btn-primary btn-sm",
+                        onclick = "fedCopy('invite_link')"),
+            tags$span(class = "note", style = "margin-left:10px;",
+                      "Use this when the software is already installed."))
+      ),
+      if (nzchar(onboarding_msg)) tagList(
+        div(class = "sec-lbl", "Message To Send"),
+        p(class = "note", style = "margin-top:0;",
+          "A single short message covering both cases: already installed or first-time setup."),
+        tags$textarea(id = "onboard_msg", class = "inv-box", readonly = NA,
+                      style = "height:220px;", onboarding_msg),
+        div(style = "margin-top:6px;",
+            tags$button("Copy message", class = "btn btn-primary btn-sm",
+                        onclick = "fedCopy('onboard_msg')"),
+            if (nzchar(onboarding_mailto))
+              tags$a("Open in email", href = onboarding_mailto,
+                     class = "btn btn-default btn-sm", style = "margin-left:6px;"))
+      ),
+      footer = modalButton("Done"), easyClose = TRUE, size = "l"))
+  }
 
   observeEvent(input$inv_make, {
     name  <- trimws(input$inv_name)
@@ -1092,73 +1249,18 @@ server <- function(input, output, session) {
       reg_add_invite(reg, sid, name, study, token, exp, invite = invite))
     rv$reg <- reg_load(REG_FILE)
 
-    short_link <- if (nzchar(COORD_ADDR)) sprintf("http://%s/i/%s", COORD_ADDR, sid) else ""
-    # /get (a real page with a visible download button), not /kit directly —
-    # a silent no-page download is unreliable/invisible across browsers.
-    kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/get", COORD_ADDR) else ""
-    onboarding_msg <- if (nzchar(short_link) && nzchar(kit_link))
-      build_onboarding_message(study, kit_link, short_link) else ""
-    mailto_subject <- sprintf('Join the "%s" federated study', study)
-    invite_mailto  <- if (nzchar(short_link))
-      build_mailto_link(mailto_subject,
-                        sprintf("Here's your invite to join the study:\n\n%s", short_link)) else ""
-    onboarding_mailto <- if (nzchar(onboarding_msg))
-      build_mailto_link(mailto_subject, onboarding_msg) else ""
-
     removeModal()
-    showModal(modalDialog(
-      title = "Invite created",
-      p("Send either of these to the site operator — both work. It expires in ",
-        strong(paste0(INVITE_TTL_DAYS, " day(s)")), "."),
-      if (nzchar(short_link)) tagList(
-        div(class = "sec-lbl", "Short link (easiest to share)"),
-        tags$input(id = "invite_link", class = "form-control", readonly = NA,
-                   value = short_link,
-                   style = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92rem;"),
-        div(style = "margin-top:6px; margin-bottom:14px;",
-            tags$button("Copy link", class = "btn btn-primary btn-sm",
-                        onclick = "fedCopy('invite_link')"),
-            if (nzchar(invite_mailto))
-              tags$a("Open in email", href = invite_mailto,
-                     class = "btn btn-default btn-sm", style = "margin-left:6px;"))
-      ),
-      div(class = "sec-lbl", "Full invite text"),
-      tags$textarea(id = "invite_str", class = "inv-box", readonly = NA, invite),
-      div(style = "margin-top:6px;",
-          tags$button("Copy text", class = "btn btn-default btn-sm",
-                      onclick = "fedCopy('invite_str')")),
-      if (nzchar(onboarding_msg)) tags$details(
-        style = "margin-top:16px;",
-        tags$summary(style = "cursor:pointer; font-weight:600; color:var(--brand-deep);",
-                     "First time? This operator doesn't have the software yet"),
-        div(style = "margin-top:10px;",
-            p(class = "note", style = "margin-top:0;",
-              "One message covering Tailscale setup, the software, and this invite — ",
-              "send it instead of the invite alone."),
-            div(class = "sec-lbl", "Site kit link"),
-            p(class = "note", style = "margin-top:0;",
-              "Copy this and send it — it's for the operator to open, not you. It only ",
-              "works once they're on the tailnet."),
-            tags$input(id = "kit_link_input", class = "form-control", readonly = NA,
-                       value = kit_link,
-                       style = "font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.92rem;"),
-            div(style = "margin-top:6px; margin-bottom:14px;",
-                tags$button("Copy kit link", class = "btn btn-default btn-sm",
-                           onclick = "fedCopy('kit_link_input')")),
-            div(class = "sec-lbl", style = "margin-top:14px;", "Full onboarding message"),
-            tags$textarea(id = "onboard_msg", class = "inv-box", readonly = NA,
-                          style = "height:220px;", onboarding_msg),
-            div(style = "margin-top:6px;",
-                tags$button("Copy onboarding message", class = "btn btn-primary btn-sm",
-                            onclick = "fedCopy('onboard_msg')"),
-                if (nzchar(onboarding_mailto))
-                  tags$a("Open in email", href = onboarding_mailto,
-                         class = "btn btn-default btn-sm", style = "margin-left:6px;")))
-      ),
-      div(class = "fp", style = "margin-top:10px;",
-          "Your key fingerprint (read it to the operator to verify): ",
-          tags$b(COORD_FP)),
-      footer = modalButton("Done"), easyClose = TRUE, size = "l"))
+    show_invite_modal(rv$reg$sites[[sid]], title = "Invite created")
+  })
+
+  observeEvent(input$show_invite_sid, {
+    sid <- input$show_invite_sid
+    r <- rv$reg$sites[[sid]]
+    if (is.null(r) || is.na(r$invite) || !r$invite_state %in% c("issued", "in_use")) {
+      showNotification("That invite is no longer available to resend.", type = "warning")
+      return()
+    }
+    show_invite_modal(r, title = "Invite details")
   })
 
   # ---- Approve a held registration ------------------------------

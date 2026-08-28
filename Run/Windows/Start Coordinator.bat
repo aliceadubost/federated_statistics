@@ -115,4 +115,4 @@ echo.
 
 echo.
 echo   Coordinator stopped.
-pause
+exit /b 0
