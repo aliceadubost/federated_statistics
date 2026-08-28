@@ -47,6 +47,7 @@ KEY_FILE         <- file.path(APP_DIR, "coordinator_key.json")
 STUDY_LOG        <- file.path(APP_DIR, "study_log.jsonl")  # append-only run history
 REGISTRAR_SCRIPT <- file.path(APP_DIR, "registrar.R")
 REGISTRAR_PORT   <- as.integer(Sys.getenv("FED_REGISTRAR_PORT", "8731"))
+REGISTRAR_PORT_SCAN <- max(1L, as.integer(Sys.getenv("FED_REGISTRAR_PORT_SCAN", "20")))
 INVITE_TTL_DAYS  <- as.integer(Sys.getenv("FED_INVITE_TTL_DAYS", "7"))
 MIN_ACTIVE_SITES <- max(2L, as.integer(Sys.getenv("FED_MIN_ACTIVE_SITES", "2")))
 RSCRIPT_BIN      <- file.path(R.home("bin"),
@@ -72,14 +73,67 @@ FED_TMPDIR       <- if (.Platform$OS.type == "windows") {
 COORD_KEY  <- .load_or_create_key()
 COORD_FP   <- fed_fingerprint(COORD_KEY$public)
 COORD_HOST <- fed_advertised_host()                  # MagicDNS preferred (Q3)
-COORD_ADDR <- if (nzchar(COORD_HOST))
-                sprintf("%s:%d", COORD_HOST, REGISTRAR_PORT) else ""
+registrar_port_current <- REGISTRAR_PORT
+registrar_port_note    <- NULL
+.coord_addr <- function(port = registrar_port_current) {
+  if (nzchar(COORD_HOST)) sprintf("%s:%d", COORD_HOST, as.integer(port)) else ""
+}
+
+.make_invite_with_exp <- function(study, coord, sid, token, private_key, name = "",
+                                  exp, now = as.integer(Sys.time())) {
+  now <- as.integer(now)
+  exp <- as.integer(exp)
+  payload_norm <- getFromNamespace(".normalize_payload", "fedstats")
+  canonical    <- getFromNamespace(".canonical_json", "fedstats")
+  b64url       <- getFromNamespace(".b64url_encode", "fedstats")
+  key_raw      <- getFromNamespace(".key_raw", "fedstats")
+  prefix       <- get("INVITE_PREFIX", envir = asNamespace("fedstats"))
+  payload <- payload_norm(list(
+    v = 1L, study = study, coord = coord, sid = sid, name = name,
+    tok = token, iat = now, exp = exp
+  ))
+  priv_raw <- key_raw(private_key)
+  sig <- sodium::sig_sign(charToRaw(canonical(payload)), priv_raw)
+  envelope <- list(
+    payload = payload,
+    pk      = b64url(sodium::sig_pubkey(priv_raw)),
+    sig     = b64url(sig)
+  )
+  json <- as.character(jsonlite::toJSON(envelope, auto_unbox = TRUE, null = "null"))
+  paste0(prefix, b64url(charToRaw(json)))
+}
+
+.refresh_pending_invites <- function(reg, coord_addr, now = as.integer(Sys.time())) {
+  changed <- FALSE
+  if (is.null(reg$sites) || !length(reg$sites)) return(list(reg = reg, changed = FALSE))
+  for (sid in names(reg$sites)) {
+    r <- reg$sites[[sid]]
+    if (is.null(r) || !isTRUE(r$invite_state %in% c("issued", "in_use"))) next
+    if (is.null(r$token) || is.na(r$token) || is.null(r$study) || is.na(r$study)) next
+    if (is.null(r$exp) || is.na(r$exp) || as.integer(r$exp) <= as.integer(now)) next
+    invite_new <- .make_invite_with_exp(
+      study = r$study,
+      coord = coord_addr,
+      sid = sid,
+      token = r$token,
+      private_key = COORD_KEY$private,
+      name = if (is.null(r$name) || is.na(r$name)) "" else r$name,
+      exp = r$exp,
+      now = now
+    )
+    if (!identical(r$invite, invite_new)) {
+      reg$sites[[sid]]$invite <- invite_new
+      changed <- TRUE
+    }
+  }
+  list(reg = reg, changed = changed)
+}
 
 # ---- Registrar subprocess (single, app-level) -----------------------
-.start_registrar <- function() {
+.start_registrar <- function(port = registrar_port_current) {
   envv <- Sys.getenv()
   envv["FED_REGISTRY_FILE"]  <- REG_FILE
-  envv["FED_REGISTRAR_PORT"] <- as.character(REGISTRAR_PORT)
+  envv["FED_REGISTRAR_PORT"] <- as.character(as.integer(port))
   envv["FED_INVITE_TTL_DAYS"] <- as.character(INVITE_TTL_DAYS)
   if (.Platform$OS.type == "windows" && !dir.exists(FED_TMPDIR))
     dir.create(FED_TMPDIR, recursive = TRUE, showWarnings = FALSE)
@@ -100,6 +154,11 @@ COORD_ADDR <- if (nzchar(COORD_HOST))
     lines = lines
   )
 }
+.registrar_addr_in_use <- function(diag) {
+  if (is.null(diag) || !length(diag$lines)) return(FALSE)
+  any(grepl("address already in use|EADDRINUSE|Failed to create server",
+            diag$lines, ignore.case = TRUE))
+}
 .stop_registrar <- function(proc, wait_s = 3) {
   if (is.null(proc)) return(invisible(NULL))
   if (!proc$is_alive()) return(invisible(proc))
@@ -113,21 +172,35 @@ COORD_ADDR <- if (nzchar(COORD_HOST))
     try(proc$kill(), silent = TRUE)
   invisible(proc)
 }
-.restart_registrar <- function(retries = 2L, settle_s = 0.8) {
+.restart_registrar <- function(retries = REGISTRAR_PORT_SCAN, settle_s = 0.8) {
   if (!is.null(registrar_proc)) .stop_registrar(registrar_proc)
   last_proc <- NULL
-  for (i in seq_len(max(1L, retries))) {
-    last_proc <- tryCatch(.start_registrar(), error = function(e) NULL)
+  registrar_port_note <<- NULL
+  for (port in seq.int(REGISTRAR_PORT, length.out = max(1L, retries))) {
+    last_proc <- tryCatch(.start_registrar(port), error = function(e) NULL)
     if (is.null(last_proc)) {
       Sys.sleep(settle_s)
       next
     }
     Sys.sleep(settle_s)
-    if (last_proc$is_alive()) return(last_proc)
+    if (last_proc$is_alive()) {
+      registrar_port_current <<- as.integer(port)
+      registrar_port_note <<- if (port != REGISTRAR_PORT)
+        sprintf("Port %d was busy, so the registrar moved automatically to %d.", REGISTRAR_PORT, port)
+      else NULL
+      reg_modify(REG_FILE, function(reg) {
+        out <- .refresh_pending_invites(reg, .coord_addr(port))
+        out$reg
+      })
+      return(last_proc)
+    }
+    diag <- .read_registrar_diag(last_proc)
+    if (!.registrar_addr_in_use(diag)) return(last_proc)
   }
   last_proc
 }
-registrar_proc <- tryCatch(.start_registrar(), error = function(e) NULL)
+registrar_proc <- NULL
+registrar_proc <- tryCatch(.restart_registrar(), error = function(e) NULL)
 onStop(function() {
   try(.stop_registrar(registrar_proc), silent = TRUE)
   try(future::plan(future::sequential), silent = TRUE)  # tear down ping workers
@@ -1045,12 +1118,14 @@ server <- function(input, output, session) {
         actionButton("btn_restart_registrar", "Restart registrar",
                      class = "btn-primary btn-sm")))
     tagList(
-      if (nzchar(COORD_ADDR))
+      if (nzchar(.coord_addr()))
         div(class = "coord-addr", title = "Sites register here automatically",
-            paste0("Registrar: ", COORD_ADDR))
+            paste0("Registrar: ", .coord_addr()))
       else
         div(class = "sbadge sb-warn",
             "Tailscale not detected — invites will not be reachable remotely."),
+      if (!is.null(registrar_port_note))
+        div(class = "note", style = "margin-top:8px; color:#9A5B0A;", registrar_port_note),
       if (nzchar(key_warn) || nzchar(reg_warn))
         div(class = "note", style = "margin-top:8px; color:#9A5B0A;",
             paste(c(key_warn, reg_warn)[nzchar(c(key_warn, reg_warn))], collapse = " ")),
@@ -1066,7 +1141,9 @@ server <- function(input, output, session) {
     rv$registrar_diag <- NULL
     registrar_proc <<- tryCatch(.restart_registrar(), error = function(e) NULL)
     if (!is.null(registrar_proc) && registrar_proc$is_alive())
-      showNotification("Registrar restarted.", type = "message")
+      showNotification(
+        if (!is.null(registrar_port_note)) registrar_port_note else "Registrar restarted.",
+        type = "message", duration = 8)
     else {
       rv$registrar_diag <- .read_registrar_diag(registrar_proc)
       showNotification("Registrar could not stay running — see the error shown here.",
@@ -1162,7 +1239,7 @@ server <- function(input, output, session) {
           strong("First:"), " invite this collaborator to your private Tailscale network. ",
           "Then create and send the study invite below."),
       textInput("inv_name", "Site name (label)", placeholder = "e.g. Karolinska"),
-      if (!nzchar(COORD_ADDR))
+      if (!nzchar(.coord_addr()))
         div(class = "sbadge sb-warn",
             "Tailscale not detected — this invite will not be reachable by remote sites."),
       footer = tagList(modalButton("Cancel"),
@@ -1173,8 +1250,9 @@ server <- function(input, output, session) {
   show_invite_modal <- function(r, title = "Invite created") {
     if (is.null(r)) return(invisible(NULL))
     site_label <- if (!is.null(r$name) && nzchar(trimws(r$name))) trimws(r$name) else "Site"
-    short_link <- if (nzchar(COORD_ADDR)) sprintf("http://%s/i/%s", COORD_ADDR, r$sid) else ""
-    kit_link   <- if (nzchar(COORD_ADDR)) sprintf("http://%s/get", COORD_ADDR) else ""
+    coord_addr <- .coord_addr()
+    short_link <- if (nzchar(coord_addr)) sprintf("http://%s/i/%s", coord_addr, r$sid) else ""
+    kit_link   <- if (nzchar(coord_addr)) sprintf("http://%s/get", coord_addr) else ""
     onboarding_msg <- if (nzchar(short_link) && nzchar(kit_link))
       build_onboarding_message(r$study, site_label, kit_link, short_link) else ""
     mailto_subject <- sprintf('Join the "%s" federated study', r$study)
@@ -1241,7 +1319,7 @@ server <- function(input, output, session) {
     exp   <- as.integer(Sys.time()) + INVITE_TTL_DAYS * 86400L
 
     invite <- fed_invite_create(
-      study = study, coord = COORD_ADDR, sid = sid, token = token,
+      study = study, coord = .coord_addr(), sid = sid, token = token,
       private_key = COORD_KEY$private, name = name, ttl_days = INVITE_TTL_DAYS)
 
     # Store the invite text itself (not just the registry state) so the

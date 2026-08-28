@@ -20,6 +20,16 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/../.."
 
+close_terminal_window() {
+  if [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ] && command -v osascript &>/dev/null; then
+    osascript >/dev/null 2>&1 <<'APPLESCRIPT' &
+tell application "Terminal"
+  if (count of windows) > 0 then close front window saving no
+end tell
+APPLESCRIPT
+  fi
+}
+
 echo ""
 echo "╔══════════════════════════════════════════════╗"
 echo "║   Federated Statistics — Coordinator         ║"
@@ -101,7 +111,11 @@ echo "════════════════════════�
 echo ""
 
 Rscript -e "shiny::runApp('engine/coordinator/coordinator_app.R', launch.browser = TRUE)"
+APP_STATUS=$?
 
 echo ""
 echo "  Coordinator stopped."
-exit 0
+if [ $APP_STATUS -eq 0 ]; then
+  close_terminal_window
+fi
+exit $APP_STATUS
