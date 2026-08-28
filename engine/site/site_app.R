@@ -729,10 +729,8 @@ server <- function(input, output, session) {
     if (grepl("^https?://", raw, ignore.case = TRUE)) {
       raw <- tryCatch({
         .validate_invite_link(raw)
-        raw_json <- if (grepl("\\?", raw, fixed = TRUE))
-          paste0(raw, "&format=invite") else paste0(raw, "?format=invite")
+        raw_json <- sub("/i/([^/?#]+)", "/invite/\\1", raw, perl = TRUE)
         resp <- httr::GET(raw_json,
-                          httr::add_headers(`X-Fedstats-Client` = "site-app"),
                           httr::timeout(8))
         if (httr::status_code(resp) != 200)
           stop("That link didn't return an invite — it may have expired.")

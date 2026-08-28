@@ -192,30 +192,49 @@ pr$handle("GET", "/get", function(req, res) {
 # — and a site operator must already be on the tailnet before they'd ever
 # be pasting an invite, so this adds no new audience beyond who could
 # already reach /register.
+invite_payload_for_sid <- function(sid, now = Sys.time()) {
+  reg <- reg_load(REG_FILE)
+  r <- reg$sites[[sid]]
+  spent <- !is.null(r) && isTRUE(r$invite_state %in% c("consumed", "revoked", "expired"))
+  if (is.null(r) || is.null(r$invite) || is.na(r$invite) || spent ||
+      (!is.na(r$exp) && as.integer(now) >= r$exp)) {
+    return(NULL)
+  }
+  r
+}
+
+pr$handle("GET", "/invite/<sid>", function(req, res, sid) {
+  ip <- if (!is.null(req$REMOTE_ADDR)) req$REMOTE_ADDR else "unknown"
+  if (!rate_ok(ip)) {
+    res$status <- 429
+    return(list(error = "Too many requests. Try again shortly."))
+  }
+  r <- invite_payload_for_sid(sid)
+  if (is.null(r)) {
+    res$status <- 404
+    return(list(error = "Invite not found or expired."))
+  }
+  list(invite = r$invite)
+})
+
 pr$handle("GET", "/i/<sid>", function(req, res, sid) {
   ip <- if (!is.null(req$REMOTE_ADDR)) req$REMOTE_ADDR else "unknown"
   if (!rate_ok(ip)) {
     res$status <- 429
     return(list(error = "Too many requests. Try again shortly."))
   }
-  reg <- reg_load(REG_FILE)
-  r <- reg$sites[[sid]]
-  # Stop handing out an invite once it is no longer needed: expired by time,
-  # or already consumed/revoked. After a site has registered, nobody needs
-  # the short link again, so a consumed invite (which still carries its
-  # token) is never served to another tailnet peer who guesses the sid.
-  spent <- !is.null(r) && isTRUE(r$invite_state %in% c("consumed", "revoked", "expired"))
-  if (is.null(r) || is.null(r$invite) || is.na(r$invite) || spent ||
-      (!is.na(r$exp) && as.integer(Sys.time()) >= r$exp)) {
+  r <- invite_payload_for_sid(sid)
+  if (is.null(r)) {
     res$status <- 404
-    return(list(error = "Invite not found or expired."))
+    return(render_info_page(
+      title = "Federated Statistics - Invite expired",
+      heading = "This join link is no longer active",
+      intro = "Ask the coordinator to send you a new join link.",
+      button_label = "Download Site App",
+      button_href = "/get",
+      note = "Join links stop working after they expire or after access is revoked."
+    ))
   }
-  fmt <- if (!is.null(req$args$format) && length(req$args$format)) req$args$format[[1]] else ""
-  typ <- if (!is.null(req$args$type) && length(req$args$type)) req$args$type[[1]] else ""
-  wants_json <- identical(req$HTTP_X_FEDSTATS_CLIENT, "site-app") ||
-                identical(tolower(as.character(fmt)), "invite") ||
-                identical(tolower(as.character(typ)), "json")
-  if (isTRUE(wants_json)) return(list(invite = r$invite))
 
   site_name <- if (!is.null(r$name) && nzchar(trimws(r$name))) trimws(r$name) else "this site"
   invite_url <- sprintf("http://%s/i/%s",
@@ -238,7 +257,6 @@ pr$handle("GET", "/i/<sid>", function(req, res, sid) {
   )
   res$setHeader("Content-Type", "text/html; charset=utf-8")
   return(page)
-  list(invite = r$invite)
 }, serializer = plumber::serializer_content_type("text/html"))
 
 # ---- saved-site status check ------------------------------------
